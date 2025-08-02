@@ -4,6 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-clap = "4.5.42"
-streamstore = "0.19.1"
+clap = { version = "4.5.42", features = ["derive"] }
+eyre = "0.6.12"
+streamstore = { version = "0.19.1", features = ["connector"] }
 tokio = { version = "1.47.1", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
+serde = { version = "1.0.219", features = ["derive"] }
+tokio-stream = "0.1.17"
+tonic = "0.13.1"
+futures = "0.3.31"
+serde_json = "1.0.141"
+antithesis_sdk = "0.2.6"
+rand = "0.8.5" # required for antithesis_sdk rand compatibility
+
