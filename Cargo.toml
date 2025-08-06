@@ -2,3 +2,4 @@
 members = [
     "rust/s2-verification",
 ]
+resolver = "2"

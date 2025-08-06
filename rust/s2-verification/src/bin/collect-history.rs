@@ -1,11 +1,13 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use eyre::eyre;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use s2::client::{AppendRetryPolicy, ClientError, S2Endpoints};
 use s2::types::CreateStreamRequest;
 use s2::{Client, ClientConfig, types};
-use s2_verification::history::{client, initialize_tail};
+use s2_verification::history::{
+    client, fencing_token_client, initialize_tail, match_seq_num_client,
+};
 use std::env;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -17,14 +19,23 @@ use tracing::{debug, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+#[derive(ValueEnum, Clone, Debug)]
+enum Workflow {
+    Regular,
+    MatchSeqNum,
+    Fencing,
+}
+
 #[derive(Parser, Debug)]
 struct Args {
     basin: String,
     stream: String,
     #[clap(long, default_value_t = 5)]
-    num_concurrent_clients: u8,
+    num_concurrent_clients: u16,
     #[clap(long, default_value_t = 100)]
     num_ops_per_client: usize,
+    #[clap(long, value_enum, default_value = "regular")]
+    workflow: Workflow,
 }
 
 pub fn init_tracing() {
@@ -46,6 +57,7 @@ async fn main() -> eyre::Result<()> {
         stream,
         num_concurrent_clients,
         num_ops_per_client,
+        workflow,
     } = Args::parse();
 
     let disable_tls = std::env::var("S2_DISABLE_TLS")
@@ -124,15 +136,36 @@ async fn main() -> eyre::Result<()> {
     debug!("starting concurrent clients");
     let mut futs = FuturesUnordered::new();
     for client_id in 0..num_concurrent_clients {
-        futs.push(client(
-            num_ops_per_client,
-            Client::new(config.clone())
-                .basin_client(basin.clone())
-                .stream_client(stream),
-            client_id,
-            op_ids.clone(),
-            history_tx.clone(),
-        ))
+        let stream_client = Client::new(config.clone())
+            .basin_client(basin.clone())
+            .stream_client(stream);
+
+        let fut: std::pin::Pin<Box<dyn std::future::Future<Output = eyre::Result<()>> + Send>> =
+            match workflow {
+                Workflow::Regular => Box::pin(client(
+                    num_ops_per_client,
+                    stream_client,
+                    client_id,
+                    op_ids.clone(),
+                    history_tx.clone(),
+                )),
+                Workflow::MatchSeqNum => Box::pin(match_seq_num_client(
+                    num_ops_per_client,
+                    stream_client,
+                    client_id,
+                    op_ids.clone(),
+                    history_tx.clone(),
+                )),
+                Workflow::Fencing => Box::pin(fencing_token_client(
+                    num_ops_per_client,
+                    stream_client,
+                    client_id,
+                    op_ids.clone(),
+                    history_tx.clone(),
+                )),
+            };
+
+        futs.push(fut);
     }
     while let Some(_f) = futs.next().await {}
     debug!("all clients finished");

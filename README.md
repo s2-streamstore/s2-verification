@@ -47,6 +47,26 @@ A few things to keep in mind:
 - Each client will randomly choose between an append, read, and check-tail operation.
 - It is hard to predict how hard of a time Porcupine will have assembling a linear history. In general, the more clients, the harder it is to construct a history in a reasonable amount of time.
 
+There are three types of client behaviors that can be selected from, using the `workflow` argument in the CLI.
+
+#### `regular` (default)
+
+The concurrent clients will not use any concurrency primitives. All appends are expected to succeed, unless there is a loss of availability.
+
+#### `match-seq-num`
+
+Concurrent clients will all maintain a local guess of what the next expected sequence number is, updated whenever `tail` info is received (from a successful append, read, or check-tail op). This value will be used for a `matchSeqNum` guard on the subsequent append made by that client.
+
+All clients will be racing, in effect, so we expect to see many appends receiving definite failures (whenever the `matchSeqNum` condition cannot be satisfied). The more concurrent clients, the more apparent this race becomes.
+
+#### `fencing`
+
+Concurrent clients will attempt to set a fencing token, to a token unique to each client, whenever a client's operation counter % 100 == 0. Similar to above, this will result in a race, and we expect many definite append failures.
+
+The `setFencingToken` op will be guarded by a `matchSeqNum` to avoid a simple last-write-win situation.
+
+### Outputs
+
 If all goes well, you should see something like: `writer finished, path: "./data/records.1754354415.jsonl"`. This file contains your history.
 
 The log contains JSON objects (per line) with details about calls and returns.
@@ -54,30 +74,37 @@ The log contains JSON objects (per line) with details about calls and returns.
 The ordering expresses the relative timing of events (start and finish calls) observed by the history binary.
 
 For example:
-```json
-{
-  "event": {
-    "Finish": {
-      "op": "Read",
-      "definite_failure": false,
-      "failure": false,
-      "tail": 270
-    }
-  },
-  "client_id": 3,
-  "op_id": 16
-}
-```
+
+The start of an append, for a batch containing 5 records, which specifies a `match_seq_num` clause, is represented like:
 ```json
 {
   "event": {
     "Start": {
-      "op": "Append",
-      "num_records": 80
+      "Append": {
+        "num_records": 5,
+        "set_fencing_token": null,
+        "fencing_token": null,
+        "match_seq_num": 2733
+      }
     }
   },
-  "client_id": 3,
-  "op_id": 21
+  "client_id": 2,
+  "op_id": 4984
+}
+```
+
+... and its eventual (successful) return would be represented like:
+```json
+{
+  "event": {
+    "Finish": {
+      "Success": {
+        "tail": 2738
+      }
+    }
+  },
+  "client_id": 2,
+  "op_id": 4984
 }
 ```
 

@@ -2,5 +2,9 @@
 
 target
 
+# Go binaries
+bin/
+golang/s2-porcupine/s2-porcupine
+
 data
 porcupine-outputs

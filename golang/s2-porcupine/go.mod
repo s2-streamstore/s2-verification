@@ -1,4 +1,4 @@
-module github.com/s2-streamstore/s2-verification/linearizability
+module github.com/s2-streamstore/s2-verification/s2-porcupine
 
 go 1.23
 
