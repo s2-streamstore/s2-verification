@@ -18,7 +18,7 @@ make build-go
 
 ### Create a basin
 
-Create a S2 basin for your test streams. This can be done on the [https://s2.dev/dashboard](dashboard), or via the [CLI](https://s2.dev/docs/quickstart):
+Create a S2 basin for your test streams. This can be done on the [dashboard](https://s2.dev/dashboard), or via the [CLI](https://s2.dev/docs/quickstart):
 ```bash
 s2 create-basin linearizability-testing-0001
 ```
