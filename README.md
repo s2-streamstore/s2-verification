@@ -10,9 +10,17 @@ A concurrent history can also be collected against the prod S2 service, and eval
 
 You will need active installations of Rust and Golang. (Also `make`.)
 
+### Porcupine model (golang)
+
 ```bash
-make build-go
+make install-go
 ```
+
+You should then have `s2-porcupine` in your `$GOBIN`.
+
+### History collector (Rust)
+
+Easiest to run this with `cargo`.
 
 ## Running
 
@@ -114,9 +122,9 @@ Provide the log obtained above to the Porcupine model:
 
 ```bash
 # if you haven't already:
-make build-go
+make install-go
 
 # invoke the binary with your history jsonl file
-./golang/linearizability/bin/basic \
+s2-porcupine \
   -file="./data/records.1754354415.jsonl"
 ```
