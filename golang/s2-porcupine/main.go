@@ -277,6 +277,11 @@ var s2Model = porcupine.NondeterministicModel{
 
 		} else if inp.InputType == 1 || inp.InputType == 2 {
 			// Read or Check-Tail
+			if out.Crc32 != nil {
+				if startingState.Crc32 != *out.Crc32 {
+					return []interface{}{}
+				}
+			}
 			if out.Failure || startingState.Tail == *out.Tail {
 				return []interface{}{startingState}
 			} else {
