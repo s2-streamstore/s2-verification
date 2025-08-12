@@ -1,5 +1,5 @@
 use antithesis_sdk::random::AntithesisRng;
-use eyre::eyre;
+use eyre::{eyre, OptionExt};
 use rand::Rng;
 use s2::types::{CommandRecord, FencingToken};
 use s2::{
@@ -11,6 +11,7 @@ use s2::{
 use serde::Serialize;
 use std::sync::{Arc, atomic::AtomicU64};
 use std::time::Duration;
+use crc32fast::Hasher;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 use tonic::Code;
@@ -21,7 +22,8 @@ const MAX_BATCH_BYTES: usize = 1024;
 const PER_RECORD_OVERHEAD: usize = 8;
 const INDEFINITE_APPEND_WAIT: Duration = Duration::from_secs(1);
 
-pub fn generate_records(num_records: usize) -> eyre::Result<AppendRecordBatch> {
+/// Create a batch of records containing random data.
+pub fn generate_records(num_records: usize) -> eyre::Result<(AppendRecordBatch)> {
     let mut records = AppendRecordBatch::with_max_capacity(num_records);
     let mut batch_bytes: usize = 0;
     let mut rng = AntithesisRng;
@@ -53,6 +55,7 @@ pub fn generate_records(num_records: usize) -> eyre::Result<AppendRecordBatch> {
 pub enum CallStart {
     Append {
         num_records: u64,
+        last_record_crc32: u32,
         set_fencing_token: Option<String>,
         fencing_token: Option<String>,
         match_seq_num: Option<u64>,
@@ -63,9 +66,13 @@ pub enum CallStart {
 
 #[derive(Serialize, Debug)]
 pub enum CallFinish {
-    DefiniteFailure,
-    IndefiniteFailure,
-    Success { tail: u64 },
+    AppendDefiniteFailure,
+    AppendIndefiniteFailure,
+    AppendSuccess { tail: u64 },
+    CheckTailFailure,
+    CheckTailSuccess { tail: u64 },
+    ReadFailure,
+    ReadSuccess { tail: u64, crc32: u32 },
 }
 
 #[derive(Serialize, Debug)]
@@ -240,6 +247,7 @@ pub async fn client(
 #[tracing::instrument(level = Level::TRACE, skip_all)]
 async fn resolve_read_tail(mut stream: Streaming<ReadOutput>) -> eyre::Result<CallFinish> {
     let mut tail = 0;
+    let mut crc32 = 0;
     while let Some(resp) = stream.next().await {
         trace!(?resp, "read response");
         match resp {
@@ -247,19 +255,20 @@ async fn resolve_read_tail(mut stream: Streaming<ReadOutput>) -> eyre::Result<Ca
                 let Some(last) = batch.records.last() else {
                     return Err(eyre!("received empty batch"));
                 };
+                crc32 = crc32fast::hash(last.body.as_ref());
                 tail = last.seq_num + 1;
             }
             Ok(ReadOutput::NextSeqNum(nsn)) => {
                 trace!(nsn, "next_seq_num");
-                return Ok(CallFinish::Success { tail: nsn });
+                return Ok(CallFinish::ReadSuccess { tail: nsn, crc32 });
             }
             Err(e) => {
                 error!(?e, "read error");
-                return Ok(CallFinish::DefiniteFailure);
+                return Ok(CallFinish::ReadFailure);
             }
         }
     }
-    Ok(CallFinish::Success { tail })
+    Ok(CallFinish::ReadSuccess { tail, crc32 })
 }
 
 #[tracing::instrument(level = Level::TRACE, skip(history_tx, stream))]
@@ -291,11 +300,11 @@ async fn read_session(
         }
         Err(_e) => {
             trace!("read_session error");
-            CallFinish::DefiniteFailure
+            CallFinish::ReadFailure
         }
     };
 
-    let tail = if let CallFinish::Success { tail } = finish {
+    let tail = if let CallFinish::ReadSuccess { tail, crc32 } = finish {
         Some(tail)
     } else {
         None
@@ -325,10 +334,10 @@ async fn check_tail(
     let resp = stream.check_tail().await;
     trace!(?resp, "check_tail response");
     let finish = match resp {
-        Ok(pos) => CallFinish::Success { tail: pos.seq_num },
-        Err(_e) => CallFinish::DefiniteFailure,
+        Ok(pos) => CallFinish::CheckTailSuccess { tail: pos.seq_num },
+        Err(_e) => CallFinish::CheckTailFailure,
     };
-    let tail = if let CallFinish::Success { tail } = finish {
+    let tail = if let CallFinish::CheckTailSuccess { tail } = finish {
         Some(tail)
     } else {
         None
@@ -363,8 +372,14 @@ async fn append(
         set_fencing_token = Some(token);
     }
 
+    // Grab crc32 of last record in batch.
+    let mut crc_hasher = Hasher::new();
+    crc_hasher.update(records.as_ref().iter().last().ok_or_eyre("no records in batch")?.body());
+    let crc = crc_hasher.finalize();
+
     let start = CallStart::Append {
         num_records: records.len() as u64,
+        last_record_crc32: crc,
         set_fencing_token,
         fencing_token: fencing_token.clone(),
         match_seq_num,
@@ -385,12 +400,12 @@ async fn append(
     let resp = stream.append(input).await;
     trace!(?resp, "append response");
     let finish = match resp {
-        Ok(ack) => CallFinish::Success {
+        Ok(ack) => CallFinish::AppendSuccess {
             tail: ack.end.seq_num,
         },
         Err(e) => {
             let finish = match e {
-                ClientError::Conversion(_) => CallFinish::DefiniteFailure,
+                ClientError::Conversion(_) => CallFinish::AppendDefiniteFailure,
                 ClientError::Service(status)
                     if matches!(
                         status.code(),
@@ -406,12 +421,12 @@ async fn append(
                             | Code::Unauthenticated
                     ) =>
                 {
-                    CallFinish::DefiniteFailure
+                    CallFinish::AppendDefiniteFailure
                 }
-                _ => CallFinish::IndefiniteFailure,
+                _ => CallFinish::AppendIndefiniteFailure,
             };
 
-            if let CallFinish::IndefiniteFailure = finish {
+            if let CallFinish::AppendIndefiniteFailure = finish {
                 // The append experienced an indefinite failure, meaning we do not know
                 // if it had a side-effect.
 
@@ -440,7 +455,7 @@ async fn append(
         }
     };
 
-    let tail = if let CallFinish::Success { tail } = finish {
+    let tail = if let CallFinish::AppendSuccess { tail } = finish {
         Some(tail)
     } else {
         None
@@ -463,10 +478,12 @@ pub async fn initialize_tail(
     history_tx: UnboundedSender<LabeledEvent>,
     op_id: u64,
     tail: u64,
+    crc32: u32
 ) -> eyre::Result<()> {
     history_tx.send(LabeledEvent {
         event: Event::Start(CallStart::Append {
             num_records: tail,
+            last_record_crc32: crc32,
             set_fencing_token: None,
             fencing_token: None,
             match_seq_num: None,
@@ -475,7 +492,7 @@ pub async fn initialize_tail(
         op_id,
     })?;
     history_tx.send(LabeledEvent {
-        event: Event::Finish(CallFinish::Success { tail }),
+        event: Event::Finish(CallFinish::AppendSuccess { tail }),
         client_id: 0,
         op_id,
     })?;

@@ -3,7 +3,7 @@ use eyre::eyre;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use s2::client::{AppendRetryPolicy, ClientError, S2Endpoints};
-use s2::types::CreateStreamRequest;
+use s2::types::{CreateStreamRequest, ReadLimit, ReadOutput, ReadRequest, ReadStart};
 use s2::{Client, ClientConfig, types};
 use s2_verification::history::{
     client, fencing_token_client, initialize_tail, match_seq_num_client,
@@ -47,6 +47,7 @@ pub fn init_tracing() {
         .with_writer(std::io::stderr);
     registry.with(formatter.compact()).init()
 }
+
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -94,17 +95,30 @@ async fn main() -> eyre::Result<()> {
         .basin_client(basin.clone())
         .stream_client(stream);
     let resp = stream_client.check_tail().await?;
-    if resp.seq_num != 0 {
+    let resp = stream_client.read(ReadRequest::new(ReadStart::TailOffset(1)).with_limit(ReadLimit::new().with_count(1))).await?;
+
+    let rectify = match resp {
+        ReadOutput::Batch(batch) => {
+            let last = batch.records.last().expect("batch has at least one record");
+            let tail = last.seq_num + 1;
+            Some((tail, crc32fast::hash(last.body.as_ref())))
+        }
+        ReadOutput::NextSeqNum(nsn) if nsn == 0 => {
+           None 
+        },
+        _ => return Err(eyre!("impossible to rectify"))
+    };
+    if let Some((tail, crc)) = rectify {
         info!(
-            ?resp,
             "check-tail indicates stream is not empty, inserting a starter append event to rectify"
         );
         initialize_tail(
             history_tx.clone(),
             op_ids.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            resp.seq_num,
+            tail,
+            crc
         )
-        .await?;
+            .await?;
     }
 
     let writer = tokio::spawn(async move {
