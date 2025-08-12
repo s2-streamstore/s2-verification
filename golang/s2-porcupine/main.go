@@ -14,11 +14,11 @@ import (
 )
 
 type AppendArgs struct {
-	NumRecords       int     `json:"num_records"`
-	LastRecordCrc32  uint32  `json:"last_record_crc32"`
-	SetFencingToken  *string `json:"set_fencing_token"`
-	FencingToken     *string `json:"fencing_token"`
-	MatchSeqNum      *int    `json:"match_seq_num"`
+	NumRecords      int     `json:"num_records"`
+	LastRecordCrc32 uint32  `json:"last_record_crc32"`
+	SetFencingToken *string `json:"set_fencing_token"`
+	FencingToken    *string `json:"fencing_token"`
+	MatchSeqNum     *int    `json:"match_seq_num"`
 }
 
 type StartEvent struct {
@@ -79,11 +79,11 @@ type FinishEvent struct {
 	AppendSuccess           *AppendSuccessResult `json:"-"`
 	AppendDefiniteFailure   bool                 `json:"-"`
 	AppendIndefiniteFailure bool                 `json:"-"`
-	
+
 	// Read results
 	ReadSuccess *ReadSuccessResult `json:"-"`
 	ReadFailure bool               `json:"-"`
-	
+
 	// CheckTail results
 	CheckTailSuccess *CheckTailSuccessResult `json:"-"`
 	CheckTailFailure bool                    `json:"-"`
@@ -187,6 +187,7 @@ type Record struct {
 
 type StreamState struct {
 	Tail         uint32
+	Crc32        uint32
 	FencingToken *string
 }
 
@@ -197,6 +198,7 @@ type StreamInput struct {
 	BatchFencingToken *string
 	MatchSeqNum       *uint32
 	NumRecords        *uint32
+	Crc32             *uint32
 }
 
 type StreamOutput struct {
@@ -212,6 +214,7 @@ var s2Model = porcupine.NondeterministicModel{
 		states := []interface{}{
 			StreamState{
 				Tail:         0,
+				Crc32:        0,
 				FencingToken: nil,
 			},
 		}
@@ -284,7 +287,7 @@ var s2Model = porcupine.NondeterministicModel{
 	Equal: func(state1, state2 interface{}) bool {
 		st1 := state1.(StreamState)
 		st2 := state2.(StreamState)
-		return st1.Tail == st2.Tail && st1.FencingToken == st2.FencingToken
+		return st1.Tail == st2.Tail && st1.Crc32 == st2.Crc32 && st1.FencingToken == st2.FencingToken
 	},
 	DescribeOperation: func(input interface{}, output interface{}) string {
 		inp := input.(StreamInput)
@@ -369,12 +372,15 @@ func inputFromStart(se *StartEvent) StreamInput {
 	var setFencingToken *string
 	var batchFencingToken *string
 	var matchSeqNum *uint32
+	var crc32 *uint32
 
 	switch {
 	case se.Append != nil:
 		inputType = 0
 		num := uint32(se.Append.NumRecords)
 		numRecords = &num
+		crcVal := se.Append.LastRecordCrc32
+		crc32 = &crcVal
 		setFencingToken = se.Append.SetFencingToken
 		batchFencingToken = se.Append.FencingToken
 		if se.Append.MatchSeqNum != nil {
@@ -395,6 +401,7 @@ func inputFromStart(se *StartEvent) StreamInput {
 		BatchFencingToken: batchFencingToken,
 		MatchSeqNum:       matchSeqNum,
 		NumRecords:        numRecords,
+		Crc32:             crc32,
 	}
 }
 
