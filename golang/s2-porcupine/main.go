@@ -14,10 +14,11 @@ import (
 )
 
 type AppendArgs struct {
-	NumRecords      int     `json:"num_records"`
-	SetFencingToken *string `json:"set_fencing_token"`
-	FencingToken    *string `json:"fencing_token"`
-	MatchSeqNum     *int    `json:"match_seq_num"`
+	NumRecords       int     `json:"num_records"`
+	LastRecordCrc32  uint32  `json:"last_record_crc32"`
+	SetFencingToken  *string `json:"set_fencing_token"`
+	FencingToken     *string `json:"fencing_token"`
+	MatchSeqNum      *int    `json:"match_seq_num"`
 }
 
 type StartEvent struct {
@@ -60,44 +61,86 @@ func (se *StartEvent) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("unknown start event format")
 }
 
-type SuccessResult struct {
+type AppendSuccessResult struct {
+	Tail int `json:"tail"`
+}
+
+type ReadSuccessResult struct {
+	Tail  int    `json:"tail"`
+	Crc32 uint32 `json:"crc32"`
+}
+
+type CheckTailSuccessResult struct {
 	Tail int `json:"tail"`
 }
 
 type FinishEvent struct {
-	Success           *SuccessResult `json:"-"`
-	DefiniteFailure   bool           `json:"-"`
-	IndefiniteFailure bool           `json:"-"`
+	// Append results
+	AppendSuccess           *AppendSuccessResult `json:"-"`
+	AppendDefiniteFailure   bool                 `json:"-"`
+	AppendIndefiniteFailure bool                 `json:"-"`
+	
+	// Read results
+	ReadSuccess *ReadSuccessResult `json:"-"`
+	ReadFailure bool               `json:"-"`
+	
+	// CheckTail results
+	CheckTailSuccess *CheckTailSuccessResult `json:"-"`
+	CheckTailFailure bool                    `json:"-"`
 }
 
 func (fe *FinishEvent) UnmarshalJSON(data []byte) error {
-	// First try to unmarshal as a string (for DefiniteFailure and IndefiniteFailure)
+	// First try to unmarshal as a string (for failure events)
 	var str string
 	if err := json.Unmarshal(data, &str); err == nil {
 		switch str {
-		case "DefiniteFailure":
-			fe.DefiniteFailure = true
+		case "AppendDefiniteFailure":
+			fe.AppendDefiniteFailure = true
 			return nil
-		case "IndefiniteFailure":
-			fe.IndefiniteFailure = true
+		case "AppendIndefiniteFailure":
+			fe.AppendIndefiniteFailure = true
+			return nil
+		case "ReadFailure":
+			fe.ReadFailure = true
+			return nil
+		case "CheckTailFailure":
+			fe.CheckTailFailure = true
 			return nil
 		default:
 			return fmt.Errorf("unknown string finish event: %s", str)
 		}
 	}
 
-	// Try to unmarshal as an object (for Success)
+	// Try to unmarshal as an object (for success events)
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return err
 	}
 
-	if successData, ok := obj["Success"]; ok {
-		var result SuccessResult
+	if successData, ok := obj["AppendSuccess"]; ok {
+		var result AppendSuccessResult
 		if err := json.Unmarshal(successData, &result); err != nil {
-			return fmt.Errorf("parsing Success result: %w", err)
+			return fmt.Errorf("parsing AppendSuccess result: %w", err)
 		}
-		fe.Success = &result
+		fe.AppendSuccess = &result
+		return nil
+	}
+
+	if successData, ok := obj["ReadSuccess"]; ok {
+		var result ReadSuccessResult
+		if err := json.Unmarshal(successData, &result); err != nil {
+			return fmt.Errorf("parsing ReadSuccess result: %w", err)
+		}
+		fe.ReadSuccess = &result
+		return nil
+	}
+
+	if successData, ok := obj["CheckTailSuccess"]; ok {
+		var result CheckTailSuccessResult
+		if err := json.Unmarshal(successData, &result); err != nil {
+			return fmt.Errorf("parsing CheckTailSuccess result: %w", err)
+		}
+		fe.CheckTailSuccess = &result
 		return nil
 	}
 
@@ -357,22 +400,49 @@ func inputFromStart(se *StartEvent) StreamInput {
 
 func outputFromFinish(fe *FinishEvent) StreamOutput {
 	switch {
-	case fe.Success != nil:
+	// Append results
+	case fe.AppendSuccess != nil:
 		return StreamOutput{
 			Failure:         false,
 			DefiniteFailure: false,
-			Tail:            Ptr(uint32(fe.Success.Tail)),
+			Tail:            Ptr(uint32(fe.AppendSuccess.Tail)),
 		}
-	case fe.DefiniteFailure:
+	case fe.AppendDefiniteFailure:
 		return StreamOutput{
 			Failure:         true,
 			DefiniteFailure: true,
 			Tail:            nil,
 		}
-	case fe.IndefiniteFailure:
+	case fe.AppendIndefiniteFailure:
 		return StreamOutput{
 			Failure:         true,
 			DefiniteFailure: false,
+			Tail:            nil,
+		}
+	// Read results
+	case fe.ReadSuccess != nil:
+		return StreamOutput{
+			Failure:         false,
+			DefiniteFailure: false,
+			Tail:            Ptr(uint32(fe.ReadSuccess.Tail)),
+		}
+	case fe.ReadFailure:
+		return StreamOutput{
+			Failure:         true,
+			DefiniteFailure: true,
+			Tail:            nil,
+		}
+	// CheckTail results
+	case fe.CheckTailSuccess != nil:
+		return StreamOutput{
+			Failure:         false,
+			DefiniteFailure: false,
+			Tail:            Ptr(uint32(fe.CheckTailSuccess.Tail)),
+		}
+	case fe.CheckTailFailure:
+		return StreamOutput{
+			Failure:         true,
+			DefiniteFailure: true,
 			Tail:            nil,
 		}
 	default:
