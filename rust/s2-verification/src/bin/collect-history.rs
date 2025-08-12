@@ -94,7 +94,7 @@ async fn main() -> eyre::Result<()> {
     let stream_client = Client::new(config.clone())
         .basin_client(basin.clone())
         .stream_client(stream);
-    let resp = stream_client.check_tail().await?;
+    let _resp = stream_client.check_tail().await?;
     let resp = stream_client.read(ReadRequest::new(ReadStart::TailOffset(1)).with_limit(ReadLimit::new().with_count(1))).await?;
 
     let rectify = match resp {
@@ -103,7 +103,7 @@ async fn main() -> eyre::Result<()> {
             let tail = last.seq_num + 1;
             Some((tail, crc32fast::hash(last.body.as_ref())))
         }
-        ReadOutput::NextSeqNum(nsn) if nsn == 0 => {
+        ReadOutput::NextSeqNum(0) => {
            None 
         },
         _ => return Err(eyre!("impossible to rectify"))

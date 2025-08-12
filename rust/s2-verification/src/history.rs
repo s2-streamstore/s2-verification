@@ -23,7 +23,7 @@ const PER_RECORD_OVERHEAD: usize = 8;
 const INDEFINITE_APPEND_WAIT: Duration = Duration::from_secs(1);
 
 /// Create a batch of records containing random data.
-pub fn generate_records(num_records: usize) -> eyre::Result<(AppendRecordBatch)> {
+pub fn generate_records(num_records: usize) -> eyre::Result<AppendRecordBatch> {
     let mut records = AppendRecordBatch::with_max_capacity(num_records);
     let mut batch_bytes: usize = 0;
     let mut rng = AntithesisRng;
@@ -304,7 +304,7 @@ async fn read_session(
         }
     };
 
-    let tail = if let CallFinish::ReadSuccess { tail, crc32 } = finish {
+    let tail = if let CallFinish::ReadSuccess { tail, crc32: _ } = finish {
         Some(tail)
     } else {
         None
