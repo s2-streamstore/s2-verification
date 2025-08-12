@@ -237,6 +237,7 @@ var s2Model = porcupine.NondeterministicModel{
 			}
 			optimisticState := StreamState{
 				Tail:         startingState.Tail + *inp.NumRecords,
+				Crc32:        *inp.Crc32,
 				FencingToken: optimisticToken,
 			}
 			if out.Failure && out.DefiniteFailure {
@@ -305,9 +306,9 @@ var s2Model = porcupine.NondeterministicModel{
 	DescribeState: func(state interface{}) string {
 		st := state.(StreamState)
 		if st.FencingToken == nil {
-			return fmt.Sprintf("tail[%d]", st.Tail)
+			return fmt.Sprintf("tail[%d],crc32[%d]", st.Tail, st.Crc32)
 		} else {
-			return fmt.Sprintf("tail[%d],token[%s]", st.Tail, *st.FencingToken)
+			return fmt.Sprintf("tail[%d],crc32[%d],token[%s]", st.Tail, st.Crc32, *st.FencingToken)
 		}
 	},
 }
@@ -337,8 +338,14 @@ func formatAppendCall(inp StreamInput, out StreamOutput) string {
 	} else {
 		matchSeqNum = ""
 	}
+	var crc string
+	if inp.Crc32 != nil {
+		crc = fmt.Sprintf(", crc32[%d]", *inp.Crc32)
+	} else {
+		crc = ""
+	}
 
-	inRepr := fmt.Sprintf("append(len[%d]%s%s%s)", *inp.NumRecords, setToken, batchToken, matchSeqNum)
+	inRepr := fmt.Sprintf("append(len[%d]%s%s%s%s)", *inp.NumRecords, setToken, batchToken, matchSeqNum, crc)
 
 	var outRepr string
 	if out.Failure {
@@ -355,7 +362,11 @@ func formatReadCall(inp StreamInput, out StreamOutput) string {
 	if out.Failure {
 		return fmt.Sprintf("read() -> failed")
 	} else {
-		return fmt.Sprintf("read() -> tail[%d]", *out.Tail)
+		if out.Crc32 != nil {
+			return fmt.Sprintf("read() -> tail[%d], crc32[%d]", *out.Tail, *out.Crc32)
+		} else {
+			return fmt.Sprintf("read() -> tail[%d]", *out.Tail)
+		}
 	}
 }
 
