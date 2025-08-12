@@ -15,6 +15,7 @@ import (
 
 type AppendArgs struct {
 	NumRecords      int     `json:"num_records"`
+	LastRecordCrc32 uint32  `json:"last_record_crc32"`
 	SetFencingToken *string `json:"set_fencing_token"`
 	FencingToken    *string `json:"fencing_token"`
 	MatchSeqNum     *int    `json:"match_seq_num"`
@@ -60,44 +61,86 @@ func (se *StartEvent) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("unknown start event format")
 }
 
-type SuccessResult struct {
+type AppendSuccessResult struct {
+	Tail int `json:"tail"`
+}
+
+type ReadSuccessResult struct {
+	Tail  int    `json:"tail"`
+	Crc32 uint32 `json:"crc32"`
+}
+
+type CheckTailSuccessResult struct {
 	Tail int `json:"tail"`
 }
 
 type FinishEvent struct {
-	Success           *SuccessResult `json:"-"`
-	DefiniteFailure   bool           `json:"-"`
-	IndefiniteFailure bool           `json:"-"`
+	// Append results
+	AppendSuccess           *AppendSuccessResult `json:"-"`
+	AppendDefiniteFailure   bool                 `json:"-"`
+	AppendIndefiniteFailure bool                 `json:"-"`
+
+	// Read results
+	ReadSuccess *ReadSuccessResult `json:"-"`
+	ReadFailure bool               `json:"-"`
+
+	// CheckTail results
+	CheckTailSuccess *CheckTailSuccessResult `json:"-"`
+	CheckTailFailure bool                    `json:"-"`
 }
 
 func (fe *FinishEvent) UnmarshalJSON(data []byte) error {
-	// First try to unmarshal as a string (for DefiniteFailure and IndefiniteFailure)
+	// First try to unmarshal as a string (for failure events)
 	var str string
 	if err := json.Unmarshal(data, &str); err == nil {
 		switch str {
-		case "DefiniteFailure":
-			fe.DefiniteFailure = true
+		case "AppendDefiniteFailure":
+			fe.AppendDefiniteFailure = true
 			return nil
-		case "IndefiniteFailure":
-			fe.IndefiniteFailure = true
+		case "AppendIndefiniteFailure":
+			fe.AppendIndefiniteFailure = true
+			return nil
+		case "ReadFailure":
+			fe.ReadFailure = true
+			return nil
+		case "CheckTailFailure":
+			fe.CheckTailFailure = true
 			return nil
 		default:
 			return fmt.Errorf("unknown string finish event: %s", str)
 		}
 	}
 
-	// Try to unmarshal as an object (for Success)
+	// Try to unmarshal as an object (for success events)
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return err
 	}
 
-	if successData, ok := obj["Success"]; ok {
-		var result SuccessResult
+	if successData, ok := obj["AppendSuccess"]; ok {
+		var result AppendSuccessResult
 		if err := json.Unmarshal(successData, &result); err != nil {
-			return fmt.Errorf("parsing Success result: %w", err)
+			return fmt.Errorf("parsing AppendSuccess result: %w", err)
 		}
-		fe.Success = &result
+		fe.AppendSuccess = &result
+		return nil
+	}
+
+	if successData, ok := obj["ReadSuccess"]; ok {
+		var result ReadSuccessResult
+		if err := json.Unmarshal(successData, &result); err != nil {
+			return fmt.Errorf("parsing ReadSuccess result: %w", err)
+		}
+		fe.ReadSuccess = &result
+		return nil
+	}
+
+	if successData, ok := obj["CheckTailSuccess"]; ok {
+		var result CheckTailSuccessResult
+		if err := json.Unmarshal(successData, &result); err != nil {
+			return fmt.Errorf("parsing CheckTailSuccess result: %w", err)
+		}
+		fe.CheckTailSuccess = &result
 		return nil
 	}
 
@@ -144,6 +187,7 @@ type Record struct {
 
 type StreamState struct {
 	Tail         uint32
+	Crc32        uint32
 	FencingToken *string
 }
 
@@ -154,6 +198,7 @@ type StreamInput struct {
 	BatchFencingToken *string
 	MatchSeqNum       *uint32
 	NumRecords        *uint32
+	Crc32             *uint32
 }
 
 type StreamOutput struct {
@@ -162,6 +207,7 @@ type StreamOutput struct {
 	// Definite failures are those which are guaranteed to not have a side-effect.
 	DefiniteFailure bool
 	Tail            *uint32
+	Crc32           *uint32
 }
 
 var s2Model = porcupine.NondeterministicModel{
@@ -169,6 +215,7 @@ var s2Model = porcupine.NondeterministicModel{
 		states := []interface{}{
 			StreamState{
 				Tail:         0,
+				Crc32:        0,
 				FencingToken: nil,
 			},
 		}
@@ -190,6 +237,7 @@ var s2Model = porcupine.NondeterministicModel{
 			}
 			optimisticState := StreamState{
 				Tail:         startingState.Tail + *inp.NumRecords,
+				Crc32:        *inp.Crc32,
 				FencingToken: optimisticToken,
 			}
 			if out.Failure && out.DefiniteFailure {
@@ -229,6 +277,11 @@ var s2Model = porcupine.NondeterministicModel{
 
 		} else if inp.InputType == 1 || inp.InputType == 2 {
 			// Read or Check-Tail
+			if out.Crc32 != nil {
+				if startingState.Crc32 != *out.Crc32 {
+					return []interface{}{}
+				}
+			}
 			if out.Failure || startingState.Tail == *out.Tail {
 				return []interface{}{startingState}
 			} else {
@@ -241,7 +294,7 @@ var s2Model = porcupine.NondeterministicModel{
 	Equal: func(state1, state2 interface{}) bool {
 		st1 := state1.(StreamState)
 		st2 := state2.(StreamState)
-		return st1.Tail == st2.Tail && st1.FencingToken == st2.FencingToken
+		return st1.Tail == st2.Tail && st1.Crc32 == st2.Crc32 && st1.FencingToken == st2.FencingToken
 	},
 	DescribeOperation: func(input interface{}, output interface{}) string {
 		inp := input.(StreamInput)
@@ -258,9 +311,9 @@ var s2Model = porcupine.NondeterministicModel{
 	DescribeState: func(state interface{}) string {
 		st := state.(StreamState)
 		if st.FencingToken == nil {
-			return fmt.Sprintf("tail[%d]", st.Tail)
+			return fmt.Sprintf("tail[%d],crc32[%d]", st.Tail, st.Crc32)
 		} else {
-			return fmt.Sprintf("tail[%d],token[%s]", st.Tail, *st.FencingToken)
+			return fmt.Sprintf("tail[%d],crc32[%d],token[%s]", st.Tail, st.Crc32, *st.FencingToken)
 		}
 	},
 }
@@ -290,8 +343,14 @@ func formatAppendCall(inp StreamInput, out StreamOutput) string {
 	} else {
 		matchSeqNum = ""
 	}
+	var crc string
+	if inp.Crc32 != nil {
+		crc = fmt.Sprintf(", crc32[%d]", *inp.Crc32)
+	} else {
+		crc = ""
+	}
 
-	inRepr := fmt.Sprintf("append(len[%d]%s%s%s)", *inp.NumRecords, setToken, batchToken, matchSeqNum)
+	inRepr := fmt.Sprintf("append(len[%d]%s%s%s%s)", *inp.NumRecords, setToken, batchToken, matchSeqNum, crc)
 
 	var outRepr string
 	if out.Failure {
@@ -308,7 +367,11 @@ func formatReadCall(inp StreamInput, out StreamOutput) string {
 	if out.Failure {
 		return fmt.Sprintf("read() -> failed")
 	} else {
-		return fmt.Sprintf("read() -> tail[%d]", *out.Tail)
+		if out.Crc32 != nil {
+			return fmt.Sprintf("read() -> tail[%d], crc32[%d]", *out.Tail, *out.Crc32)
+		} else {
+			return fmt.Sprintf("read() -> tail[%d]", *out.Tail)
+		}
 	}
 }
 
@@ -326,12 +389,15 @@ func inputFromStart(se *StartEvent) StreamInput {
 	var setFencingToken *string
 	var batchFencingToken *string
 	var matchSeqNum *uint32
+	var crc32 *uint32
 
 	switch {
 	case se.Append != nil:
 		inputType = 0
 		num := uint32(se.Append.NumRecords)
 		numRecords = &num
+		crcVal := se.Append.LastRecordCrc32
+		crc32 = &crcVal
 		setFencingToken = se.Append.SetFencingToken
 		batchFencingToken = se.Append.FencingToken
 		if se.Append.MatchSeqNum != nil {
@@ -352,28 +418,63 @@ func inputFromStart(se *StartEvent) StreamInput {
 		BatchFencingToken: batchFencingToken,
 		MatchSeqNum:       matchSeqNum,
 		NumRecords:        numRecords,
+		Crc32:             crc32,
 	}
 }
 
 func outputFromFinish(fe *FinishEvent) StreamOutput {
 	switch {
-	case fe.Success != nil:
+	// Append results
+	case fe.AppendSuccess != nil:
 		return StreamOutput{
 			Failure:         false,
 			DefiniteFailure: false,
-			Tail:            Ptr(uint32(fe.Success.Tail)),
+			Tail:            Ptr(uint32(fe.AppendSuccess.Tail)),
+			Crc32:           nil,
 		}
-	case fe.DefiniteFailure:
+	case fe.AppendDefiniteFailure:
 		return StreamOutput{
 			Failure:         true,
 			DefiniteFailure: true,
 			Tail:            nil,
+			Crc32:           nil,
 		}
-	case fe.IndefiniteFailure:
+	case fe.AppendIndefiniteFailure:
 		return StreamOutput{
 			Failure:         true,
 			DefiniteFailure: false,
 			Tail:            nil,
+			Crc32:           nil,
+		}
+	// Read results
+	case fe.ReadSuccess != nil:
+		return StreamOutput{
+			Failure:         false,
+			DefiniteFailure: false,
+			Tail:            Ptr(uint32(fe.ReadSuccess.Tail)),
+			Crc32:           Ptr(fe.ReadSuccess.Crc32),
+		}
+	case fe.ReadFailure:
+		return StreamOutput{
+			Failure:         true,
+			DefiniteFailure: true,
+			Tail:            nil,
+			Crc32:           nil,
+		}
+	// CheckTail results
+	case fe.CheckTailSuccess != nil:
+		return StreamOutput{
+			Failure:         false,
+			DefiniteFailure: false,
+			Tail:            Ptr(uint32(fe.CheckTailSuccess.Tail)),
+			Crc32:           nil,
+		}
+	case fe.CheckTailFailure:
+		return StreamOutput{
+			Failure:         true,
+			DefiniteFailure: true,
+			Tail:            nil,
+			Crc32:           nil,
 		}
 	default:
 		panic("unknown finish event type")
