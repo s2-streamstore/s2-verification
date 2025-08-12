@@ -207,6 +207,7 @@ type StreamOutput struct {
 	// Definite failures are those which are guaranteed to not have a side-effect.
 	DefiniteFailure bool
 	Tail            *uint32
+	Crc32           *uint32
 }
 
 var s2Model = porcupine.NondeterministicModel{
@@ -413,18 +414,21 @@ func outputFromFinish(fe *FinishEvent) StreamOutput {
 			Failure:         false,
 			DefiniteFailure: false,
 			Tail:            Ptr(uint32(fe.AppendSuccess.Tail)),
+			Crc32:           nil,
 		}
 	case fe.AppendDefiniteFailure:
 		return StreamOutput{
 			Failure:         true,
 			DefiniteFailure: true,
 			Tail:            nil,
+			Crc32:           nil,
 		}
 	case fe.AppendIndefiniteFailure:
 		return StreamOutput{
 			Failure:         true,
 			DefiniteFailure: false,
 			Tail:            nil,
+			Crc32:           nil,
 		}
 	// Read results
 	case fe.ReadSuccess != nil:
@@ -432,12 +436,14 @@ func outputFromFinish(fe *FinishEvent) StreamOutput {
 			Failure:         false,
 			DefiniteFailure: false,
 			Tail:            Ptr(uint32(fe.ReadSuccess.Tail)),
+			Crc32:           Ptr(fe.ReadSuccess.Crc32),
 		}
 	case fe.ReadFailure:
 		return StreamOutput{
 			Failure:         true,
 			DefiniteFailure: true,
 			Tail:            nil,
+			Crc32:           nil,
 		}
 	// CheckTail results
 	case fe.CheckTailSuccess != nil:
@@ -445,12 +451,14 @@ func outputFromFinish(fe *FinishEvent) StreamOutput {
 			Failure:         false,
 			DefiniteFailure: false,
 			Tail:            Ptr(uint32(fe.CheckTailSuccess.Tail)),
+			Crc32:           nil,
 		}
 	case fe.CheckTailFailure:
 		return StreamOutput{
 			Failure:         true,
 			DefiniteFailure: true,
 			Tail:            nil,
+			Crc32:           nil,
 		}
 	default:
 		panic("unknown finish event type")
