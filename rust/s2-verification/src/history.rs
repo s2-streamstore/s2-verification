@@ -1,5 +1,6 @@
 use antithesis_sdk::random::AntithesisRng;
-use eyre::{eyre, OptionExt};
+use crc32fast::Hasher;
+use eyre::{OptionExt, eyre};
 use rand::Rng;
 use s2::types::{CommandRecord, FencingToken};
 use s2::{
@@ -11,7 +12,6 @@ use s2::{
 use serde::Serialize;
 use std::sync::{Arc, atomic::AtomicU64};
 use std::time::Duration;
-use crc32fast::Hasher;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 use tonic::Code;
@@ -374,7 +374,14 @@ async fn append(
 
     // Grab crc32 of last record in batch.
     let mut crc_hasher = Hasher::new();
-    crc_hasher.update(records.as_ref().iter().last().ok_or_eyre("no records in batch")?.body());
+    crc_hasher.update(
+        records
+            .as_ref()
+            .iter()
+            .last()
+            .ok_or_eyre("no records in batch")?
+            .body(),
+    );
     let crc = crc_hasher.finalize();
 
     let start = CallStart::Append {
@@ -478,7 +485,7 @@ pub async fn initialize_tail(
     history_tx: UnboundedSender<LabeledEvent>,
     op_id: u64,
     tail: u64,
-    crc32: u32
+    crc32: u32,
 ) -> eyre::Result<()> {
     history_tx.send(LabeledEvent {
         event: Event::Start(CallStart::Append {

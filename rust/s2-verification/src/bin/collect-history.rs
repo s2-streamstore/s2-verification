@@ -48,7 +48,6 @@ pub fn init_tracing() {
     registry.with(formatter.compact()).init()
 }
 
-
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     init_tracing();
@@ -95,7 +94,9 @@ async fn main() -> eyre::Result<()> {
         .basin_client(basin.clone())
         .stream_client(stream);
     let _resp = stream_client.check_tail().await?;
-    let resp = stream_client.read(ReadRequest::new(ReadStart::TailOffset(1)).with_limit(ReadLimit::new().with_count(1))).await?;
+    let resp = stream_client
+        .read(ReadRequest::new(ReadStart::TailOffset(1)).with_limit(ReadLimit::new().with_count(1)))
+        .await?;
 
     let rectify = match resp {
         ReadOutput::Batch(batch) => {
@@ -103,10 +104,8 @@ async fn main() -> eyre::Result<()> {
             let tail = last.seq_num + 1;
             Some((tail, crc32fast::hash(last.body.as_ref())))
         }
-        ReadOutput::NextSeqNum(0) => {
-           None 
-        },
-        _ => return Err(eyre!("impossible to rectify"))
+        ReadOutput::NextSeqNum(0) => None,
+        _ => return Err(eyre!("impossible to rectify")),
     };
     if let Some((tail, crc)) = rectify {
         info!(
@@ -116,9 +115,9 @@ async fn main() -> eyre::Result<()> {
             history_tx.clone(),
             op_ids.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             tail,
-            crc
+            crc,
         )
-            .await?;
+        .await?;
     }
 
     let writer = tokio::spawn(async move {
