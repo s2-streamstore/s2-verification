@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 use tonic::Code;
-use tracing::{warn, Level};
+use tracing::{Level, warn};
 use tracing::{debug, error, trace};
 
 const MAX_BATCH_BYTES: usize = 1024;
@@ -178,10 +178,10 @@ pub async fn fencing_token_client(
                         let client_id_candidate =
                             client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if client_id_candidate < MAX_CLIENT_IDS {
-                           client_id = client_id_candidate;
+                            client_id = client_id_candidate;
                         } else {
                             warn!("max client ids reached");
-                           break 'samples;
+                            break 'samples;
                         }
                     }
                     fin
