@@ -5,7 +5,10 @@ use futures::stream::FuturesUnordered;
 use s2::client::{AppendRetryPolicy, ClientError, S2Endpoints};
 use s2::types::{CreateStreamRequest, ReadLimit, ReadOutput, ReadRequest, ReadStart};
 use s2::{Client, ClientConfig, types};
-use s2_verification::history::{LabeledEvent, client, fencing_token_client, initialize_tail, match_seq_num_client, Event, CallFinish};
+use s2_verification::history::{
+    CallFinish, Event, LabeledEvent, client, fencing_token_client, initialize_tail,
+    match_seq_num_client,
+};
 use std::env;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -182,10 +185,13 @@ async fn main() -> eyre::Result<()> {
     }
     let deferred = futs.collect::<Vec<_>>().await;
     debug!(?deferred, "all clients finished");
-    
+
     for result in deferred {
         for fin in result? {
-            assert!(matches!(fin.event, Event::Finish(CallFinish::AppendIndefiniteFailure)));
+            assert!(matches!(
+                fin.event,
+                Event::Finish(CallFinish::AppendIndefiniteFailure)
+            ));
             history_tx.send(fin)?;
         }
     }
