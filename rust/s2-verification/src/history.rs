@@ -115,6 +115,28 @@ fn random_op() -> Op {
     }
 }
 
+/// Handle an indefinite failure by deferring the event and attempting to rotate to a new client ID.
+/// 
+/// Returns `Some(new_client_id)` if a new client ID was successfully acquired,
+/// or `None` if the maximum number of client IDs has been reached (caller should break).
+async fn handle_indefinite_failure(
+    fin: &LabeledEvent,
+    deferred: &mut Vec<LabeledEvent>,
+    client_id_atomic: &Arc<AtomicU64>,
+) -> Option<u64> {
+    // Call failed indefinitely, so we hold on to the finish log, and also assume a new
+    // client identity, as the old one can no longer be used.
+    deferred.push(fin.clone());
+    tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
+    let client_id_candidate = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if client_id_candidate < MAX_CLIENT_IDS {
+        Some(client_id_candidate)
+    } else {
+        warn!("max client ids reached");
+        None
+    }
+}
+
 /// Run a client that randomly selects between ops.
 ///
 /// When append operations are attempted, this client will specify a fencing token value.
@@ -159,14 +181,9 @@ pub async fn fencing_token_client(
             match fin.event {
                 Event::Finish(CallFinish::AppendDefiniteFailure) => {}
                 Event::Finish(CallFinish::AppendIndefiniteFailure) => {
-                    deferred.push(fin.clone());
-                    tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
-                    let client_id_candidate =
-                        client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if client_id_candidate < MAX_CLIENT_IDS {
-                        client_id = client_id_candidate;
+                    if let Some(new_client_id) = handle_indefinite_failure(&fin, &mut deferred, &client_id_atomic).await {
+                        client_id = new_client_id;
                     } else {
-                        warn!("max client ids reached");
                         break 'samples;
                     }
                 }
@@ -191,16 +208,9 @@ pub async fn fencing_token_client(
                     )
                     .await?;
                     if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
-                        // Call failed indefinitely, so we hold on to the finish log, and also assume a new
-                        // client identity, as the old one can no longer be used.
-                        deferred.push(fin.clone());
-                        tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
-                        let client_id_candidate =
-                            client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if client_id_candidate < MAX_CLIENT_IDS {
-                            client_id = client_id_candidate;
+                        if let Some(new_client_id) = handle_indefinite_failure(&fin, &mut deferred, &client_id_atomic).await {
+                            client_id = new_client_id;
                         } else {
-                            warn!("max client ids reached");
                             break 'samples;
                         }
                     }
@@ -260,16 +270,9 @@ pub async fn match_seq_num_client(
                 )
                 .await?;
                 if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
-                    // Call failed indefinitely, so we hold on to the finish log, and also assume a new
-                    // client identity, as the old one can no longer be used.
-                    deferred.push(fin.clone());
-                    tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
-                    let client_id_candidate =
-                        client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if client_id_candidate < MAX_CLIENT_IDS {
-                        client_id = client_id_candidate;
+                    if let Some(new_client_id) = handle_indefinite_failure(&fin, &mut deferred, &client_id_atomic).await {
+                        client_id = new_client_id;
                     } else {
-                        warn!("max client ids reached");
                         break 'samples;
                     }
                 }
@@ -326,16 +329,9 @@ pub async fn client(
                 )
                 .await?;
                 if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
-                    // Call failed indefinitely, so we hold on to the finish log, and also assume a new
-                    // client identity, as the old one can no longer be used.
-                    deferred.push(fin.clone());
-                    tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
-                    let client_id_candidate =
-                        client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if client_id_candidate < MAX_CLIENT_IDS {
-                        client_id = client_id_candidate;
+                    if let Some(new_client_id) = handle_indefinite_failure(&fin, &mut deferred, &client_id_atomic).await {
+                        client_id = new_client_id;
                     } else {
-                        warn!("max client ids reached");
                         break 'samples;
                     }
                 }
