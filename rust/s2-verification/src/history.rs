@@ -101,7 +101,7 @@ pub enum Event {
 
 #[derive(Serialize, Clone, Debug)]
 pub struct LabeledEvent {
-    event: Event,
+    pub event: Event,
     client_id: u64,
     op_id: u64,
 }
@@ -115,6 +115,17 @@ fn random_op() -> Op {
     }
 }
 
+/// Run a client that randomly selects between ops.
+///
+/// When append operations are attempted, this client will specify a fencing token value.
+/// The fencing token is unique to this client.
+///
+/// Additionally, every 100 operations (including zero'th), the client will attempt to set the
+/// stream's fencing token. This append will use a `matchSeqNum` to avoid a simple last-write-win
+/// situation.
+///
+/// Returns a list of deferred events, which were not communicated via `history_tx`.
+/// These correspond to `AppendIndefiniteFailure` events.
 pub async fn fencing_token_client(
     num_ops: usize,
     stream: StreamClient,
@@ -175,7 +186,7 @@ pub async fn fencing_token_client(
                         batch,
                         client_id,
                         op_id,
-                        Some(expected_next_seq_num),
+                        None,
                         Some(my_token.clone()),
                     )
                     .await?;
@@ -215,6 +226,13 @@ pub async fn fencing_token_client(
     Ok(deferred)
 }
 
+/// Run a client that randomly selects between ops.
+///
+/// When append operations are attempted, this client will specify a `match_seq_num` value,
+/// based on the most recent guess from a prior call.
+///
+/// Returns a list of deferred events, which were not communicated via `history_tx`.
+/// These correspond to `AppendIndefiniteFailure` events.
 pub async fn match_seq_num_client(
     num_ops: usize,
     stream: StreamClient,
@@ -275,6 +293,13 @@ pub async fn match_seq_num_client(
     Ok(deferred)
 }
 
+/// Run a client that randomly selects between ops.
+///
+/// Appends are not gated by `match_seq_num` or fencing token. Fewer definite failures
+/// are expected, compared to the `match_seq_num_client` and `fencing_token_client`.
+///
+/// Returns a list of deferred events, which were not communicated via `history_tx`.
+/// These correspond to `AppendIndefiniteFailure` events.
 pub async fn client(
     num_ops: usize,
     stream: StreamClient,
