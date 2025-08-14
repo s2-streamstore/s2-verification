@@ -21,7 +21,7 @@ use tracing::{debug, error, trace};
 const MAX_BATCH_BYTES: usize = 1024;
 const PER_RECORD_OVERHEAD: usize = 8;
 
-const INDEFINITE_FAILURE_BACKOFF: Duration = Duration::from_millis(100);
+const INDEFINITE_FAILURE_BACKOFF: Duration = Duration::from_millis(1000);
 const MAX_CLIENT_IDS: u64 = 20;
 
 /// Create a batch of records containing random data.
