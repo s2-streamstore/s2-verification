@@ -21,7 +21,16 @@ use tracing::{debug, error, trace};
 const MAX_BATCH_BYTES: usize = 1024;
 const PER_RECORD_OVERHEAD: usize = 8;
 
+/// Amount of time for a client which has experienced an indefinite failure
+/// to wait before acquiring a new client_id and attempting another op.
+///
+/// This is not required but avoids churning rapidly through new clients
+/// during a period of S2 outage.
 const INDEFINITE_FAILURE_BACKOFF: Duration = Duration::from_millis(1000);
+
+/// Maximum amount of client_ids to support in the log. If we hit this, our clients
+/// will end (early). Generally speaking, the more discrete clients in our log, the
+/// harder it is to verify linearizability in a reasonable amount of time.
 const MAX_CLIENT_IDS: u64 = 20;
 
 /// Create a batch of records containing random data.
