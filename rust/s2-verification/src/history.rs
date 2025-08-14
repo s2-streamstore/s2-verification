@@ -11,7 +11,6 @@ use s2::{
 };
 use serde::Serialize;
 use std::sync::{Arc, atomic::AtomicU64};
-use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 use tonic::Code;
@@ -20,7 +19,6 @@ use tracing::{debug, error, trace};
 
 const MAX_BATCH_BYTES: usize = 1024;
 const PER_RECORD_OVERHEAD: usize = 8;
-const INDEFINITE_APPEND_WAIT: Duration = Duration::from_secs(1);
 
 /// Create a batch of records containing random data.
 pub fn generate_records(num_records: usize) -> eyre::Result<AppendRecordBatch> {
@@ -51,7 +49,7 @@ pub fn generate_records(num_records: usize) -> eyre::Result<AppendRecordBatch> {
     Ok(records)
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub enum CallStart {
     Append {
         num_records: u64,
@@ -64,7 +62,7 @@ pub enum CallStart {
     CheckTail,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Clone, Debug)]
 pub enum CallFinish {
     AppendDefiniteFailure,
     AppendIndefiniteFailure,
@@ -82,16 +80,16 @@ pub enum Op {
     CheckTail,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub enum Event {
     Start(CallStart),
     Finish(CallFinish),
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Clone, Debug)]
 pub struct LabeledEvent {
     event: Event,
-    client_id: u16,
+    client_id: u64,
     op_id: u64,
 }
 
@@ -107,12 +105,14 @@ fn random_op() -> Op {
 pub async fn fencing_token_client(
     num_ops: usize,
     stream: StreamClient,
-    client_id: u16,
+    client_id_atomic: Arc<AtomicU64>,
     op_id_atomic: Arc<AtomicU64>,
     history_tx: UnboundedSender<LabeledEvent>,
-) -> eyre::Result<()> {
-    let my_token = format!("client_{client_id}");
+) -> eyre::Result<Vec<LabeledEvent>> {
+    let mut client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let my_token = FencingToken::generate(6)?;
     debug!(?my_token);
+    let mut deferred = Vec::new();
     let mut expected_next_seq_num = 0;
     for sample in 0..num_ops {
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -120,11 +120,9 @@ pub async fn fencing_token_client(
             // Attempt to set stream's token to my_token...
             let mut set_token_batch = AppendRecordBatch::new();
             set_token_batch
-                .push(CommandRecord::fence(FencingToken::try_from(
-                    my_token.clone(),
-                )?))
+                .push(CommandRecord::fence(my_token.clone()))
                 .map_err(|_| eyre!("failed to push fencing token"))?;
-            match append(
+            let fin = append(
                 history_tx.clone(),
                 stream.clone(),
                 set_token_batch,
@@ -133,19 +131,24 @@ pub async fn fencing_token_client(
                 Some(expected_next_seq_num),
                 None,
             )
-            .await?
-            {
-                None => {}
-                Some(_tail) => {
-                    debug!("token set to {}", my_token);
+            .await?;
+            match fin.event {
+                Event::Finish(CallFinish::AppendDefiniteFailure) => {}
+                Event::Finish(CallFinish::AppendIndefiniteFailure) => {
+                    client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    deferred.push(fin);
                 }
+                Event::Finish(CallFinish::AppendSuccess { tail }) => {
+                    expected_next_seq_num = tail;
+                }
+                _ => unreachable!(),
             }
         } else {
             debug!(?client_id, ?sample);
-            if let Some(tail) = match random_op() {
+            let resp = match random_op() {
                 Op::Append => {
                     let batch = generate_records(AntithesisRng.gen_range(1..1000))?;
-                    append(
+                    let fin = append(
                         history_tx.clone(),
                         stream.clone(),
                         batch,
@@ -154,7 +157,15 @@ pub async fn fencing_token_client(
                         Some(expected_next_seq_num),
                         Some(my_token.clone()),
                     )
-                    .await?
+                    .await?;
+                    if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
+                        // Call failed indefinitely, so we hold on to the finish log, and also assume a new
+                        // client identity, as the old one can no longer be used.
+                        deferred.push(fin.clone());
+                        client_id =
+                            client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    fin
                 }
                 Op::Read => {
                     read_session(history_tx.clone(), stream.clone(), client_id, op_id).await?
@@ -162,30 +173,37 @@ pub async fn fencing_token_client(
                 Op::CheckTail => {
                     check_tail(history_tx.clone(), stream.clone(), client_id, op_id).await?
                 }
-            } {
+            };
+            if let Event::Finish(f) = resp.event
+                && let CallFinish::AppendSuccess { tail }
+                | CallFinish::ReadSuccess { tail, .. }
+                | CallFinish::CheckTailSuccess { tail } = f
+            {
                 expected_next_seq_num = tail;
             }
         }
     }
 
-    Ok(())
+    Ok(deferred)
 }
 
 pub async fn match_seq_num_client(
     num_ops: usize,
     stream: StreamClient,
-    client_id: u16,
+    client_id_atomic: Arc<AtomicU64>,
     op_id_atomic: Arc<AtomicU64>,
     history_tx: UnboundedSender<LabeledEvent>,
-) -> eyre::Result<()> {
+) -> eyre::Result<Vec<LabeledEvent>> {
+    let mut client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut deferred = Vec::new();
     let mut expected_next_seq_num = 0;
     for sample in 0..num_ops {
         debug!(?client_id, ?sample);
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Some(tail) = match random_op() {
+        let resp = match random_op() {
             Op::Append => {
                 let batch = generate_records(AntithesisRng.gen_range(1..1000))?;
-                append(
+                let fin = append(
                     history_tx.clone(),
                     stream.clone(),
                     batch,
@@ -194,34 +212,49 @@ pub async fn match_seq_num_client(
                     Some(expected_next_seq_num),
                     None,
                 )
-                .await?
+                .await?;
+                if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
+                    // Call failed indefinitely, so we hold on to the finish log, and also assume a new
+                    // client identity, as the old one can no longer be used.
+                    deferred.push(fin.clone());
+                    client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                fin
             }
             Op::Read => read_session(history_tx.clone(), stream.clone(), client_id, op_id).await?,
             Op::CheckTail => {
                 check_tail(history_tx.clone(), stream.clone(), client_id, op_id).await?
             }
-        } {
+        };
+
+        if let Event::Finish(f) = resp.event
+            && let CallFinish::AppendSuccess { tail }
+            | CallFinish::ReadSuccess { tail, .. }
+            | CallFinish::CheckTailSuccess { tail } = f
+        {
             expected_next_seq_num = tail;
         }
     }
 
-    Ok(())
+    Ok(deferred)
 }
 
 pub async fn client(
     num_ops: usize,
     stream: StreamClient,
-    client_id: u16,
+    client_id_atomic: Arc<AtomicU64>,
     op_id_atomic: Arc<AtomicU64>,
     history_tx: UnboundedSender<LabeledEvent>,
-) -> eyre::Result<()> {
+) -> eyre::Result<Vec<LabeledEvent>> {
+    let mut client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut deferred = Vec::new();
     for sample in 0..num_ops {
         debug!(?client_id, ?sample);
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match random_op() {
             Op::Append => {
                 let batch = generate_records(AntithesisRng.gen_range(1..1000))?;
-                append(
+                let fin = append(
                     history_tx.clone(),
                     stream.clone(),
                     batch,
@@ -231,6 +264,12 @@ pub async fn client(
                     None,
                 )
                 .await?;
+                if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
+                    // Call failed indefinitely, so we hold on to the finish log, and also assume a new
+                    // client identity, as the old one can no longer be used.
+                    deferred.push(fin);
+                    client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
             Op::Read => {
                 read_session(history_tx.clone(), stream.clone(), client_id, op_id).await?;
@@ -241,7 +280,7 @@ pub async fn client(
         }
     }
 
-    Ok(())
+    Ok(deferred)
 }
 
 #[tracing::instrument(level = Level::TRACE, skip_all)]
@@ -275,9 +314,9 @@ async fn resolve_read_tail(mut stream: Streaming<ReadOutput>) -> eyre::Result<Ca
 async fn read_session(
     history_tx: UnboundedSender<LabeledEvent>,
     stream: StreamClient,
-    client_id: u16,
+    client_id: u64,
     op_id: u64,
-) -> eyre::Result<Option<u64>> {
+) -> eyre::Result<LabeledEvent> {
     history_tx.send(LabeledEvent {
         event: Event::Start(CallStart::Read),
         client_id,
@@ -304,28 +343,26 @@ async fn read_session(
         }
     };
 
-    let tail = if let CallFinish::ReadSuccess { tail, crc32: _ } = finish {
-        Some(tail)
-    } else {
-        None
-    };
-
     history_tx.send(LabeledEvent {
-        event: Event::Finish(finish),
+        event: Event::Finish(finish.clone()),
         client_id,
         op_id,
     })?;
 
-    Ok(tail)
+    Ok(LabeledEvent {
+        event: Event::Finish(finish.clone()),
+        client_id,
+        op_id,
+    })
 }
 
 #[tracing::instrument(level = Level::TRACE, skip(history_tx, stream))]
 async fn check_tail(
     history_tx: UnboundedSender<LabeledEvent>,
     stream: StreamClient,
-    client_id: u16,
+    client_id: u64,
     op_id: u64,
-) -> eyre::Result<Option<u64>> {
+) -> eyre::Result<LabeledEvent> {
     history_tx.send(LabeledEvent {
         event: Event::Start(CallStart::CheckTail),
         client_id,
@@ -337,18 +374,18 @@ async fn check_tail(
         Ok(pos) => CallFinish::CheckTailSuccess { tail: pos.seq_num },
         Err(_e) => CallFinish::CheckTailFailure,
     };
-    let tail = if let CallFinish::CheckTailSuccess { tail } = finish {
-        Some(tail)
-    } else {
-        None
-    };
+
     history_tx.send(LabeledEvent {
-        event: Event::Finish(finish),
+        event: Event::Finish(finish.clone()),
         client_id,
         op_id,
     })?;
 
-    Ok(tail)
+    Ok(LabeledEvent {
+        event: Event::Finish(finish.clone()),
+        client_id,
+        op_id,
+    })
 }
 
 #[tracing::instrument(level = Level::TRACE, skip(history_tx, stream, records))]
@@ -356,11 +393,11 @@ async fn append(
     history_tx: UnboundedSender<LabeledEvent>,
     stream: StreamClient,
     records: AppendRecordBatch,
-    client_id: u16,
+    client_id: u64,
     op_id: u64,
     match_seq_num: Option<u64>,
-    fencing_token: Option<String>,
-) -> eyre::Result<Option<u64>> {
+    fencing_token: Option<FencingToken>,
+) -> eyre::Result<LabeledEvent> {
     let mut set_fencing_token = None;
     if records.len() == 1
         && let Some(rec) = records.as_ref().iter().next()
@@ -388,7 +425,7 @@ async fn append(
         num_records: records.len() as u64,
         last_record_crc32: crc,
         set_fencing_token,
-        fencing_token: fencing_token.clone(),
+        fencing_token: fencing_token.as_ref().map(|t| t.to_string()),
         match_seq_num,
     };
     history_tx.send(LabeledEvent {
@@ -402,7 +439,7 @@ async fn append(
         input = input.with_match_seq_num(match_seq_num);
     }
     if let Some(fencing_token) = fencing_token {
-        input = input.with_fencing_token(FencingToken::try_from(fencing_token)?);
+        input = input.with_fencing_token(fencing_token);
     }
     let resp = stream.append(input).await;
     trace!(?resp, "append response");
@@ -410,71 +447,46 @@ async fn append(
         Ok(ack) => CallFinish::AppendSuccess {
             tail: ack.end.seq_num,
         },
-        Err(e) => {
-            let finish = match e {
-                ClientError::Conversion(_) => CallFinish::AppendDefiniteFailure,
-                ClientError::Service(status)
-                    if matches!(
-                        status.code(),
-                        Code::InvalidArgument
-                            | Code::NotFound
-                            | Code::AlreadyExists
-                            | Code::PermissionDenied
-                            | Code::ResourceExhausted
-                            | Code::FailedPrecondition
-                            | Code::Aborted
-                            | Code::OutOfRange
-                            | Code::Unimplemented
-                            | Code::Unauthenticated
-                    ) =>
-                {
-                    CallFinish::AppendDefiniteFailure
-                }
-                _ => CallFinish::AppendIndefiniteFailure,
-            };
-
-            if let CallFinish::AppendIndefiniteFailure = finish {
-                // The append experienced an indefinite failure, meaning we do not know
-                // if it had a side-effect.
-
-                // This is fine, and something we can account for in the linearizability model,
-                // however this append should only be considered to be finished after any
-                // potential side-effect must have occurred.
-
-                // Only once we are confident that any effect from the append would have already
-                // occurred (regardless of whether or not it did occur), can we consider this
-                // append to be finished.
-
-                // In the future, a good mechanism for this will be to use an empty-batch append
-                // against the same stream. If that succeeds, then we know:
-                //  - all prior attempted appends, if they were to become durable, would have
-                //    become so by this point
-
-                // Until we support that mechanism, we can alternatively wait for a period of time
-                // greater than the worst-case durability flush period for S2. In other words, we
-                // wait a period of time long enough that it would be impossible for S2 to have not
-                // committed a prior append that still will end up being validly appended.
-
-                tokio::time::sleep(INDEFINITE_APPEND_WAIT).await;
+        Err(e) => match e {
+            ClientError::Conversion(_) => CallFinish::AppendDefiniteFailure,
+            ClientError::Service(status)
+                if matches!(
+                    status.code(),
+                    Code::InvalidArgument
+                        | Code::NotFound
+                        | Code::AlreadyExists
+                        | Code::PermissionDenied
+                        | Code::ResourceExhausted
+                        | Code::FailedPrecondition
+                        | Code::Aborted
+                        | Code::OutOfRange
+                        | Code::Unimplemented
+                        | Code::Unauthenticated
+                ) =>
+            {
+                CallFinish::AppendDefiniteFailure
             }
+            _ => CallFinish::AppendIndefiniteFailure,
+        },
+    };
 
-            finish
+    match finish {
+        CallFinish::AppendIndefiniteFailure => {}
+        CallFinish::AppendDefiniteFailure | CallFinish::AppendSuccess { .. } => {
+            history_tx.send(LabeledEvent {
+                event: Event::Finish(finish.clone()),
+                client_id,
+                op_id,
+            })?;
         }
-    };
+        _ => unreachable!(),
+    }
 
-    let tail = if let CallFinish::AppendSuccess { tail } = finish {
-        Some(tail)
-    } else {
-        None
-    };
-
-    history_tx.send(LabeledEvent {
+    Ok(LabeledEvent {
         event: Event::Finish(finish),
         client_id,
         op_id,
-    })?;
-
-    Ok(tail)
+    })
 }
 
 /// Since the linearizability model expects a stream's tail

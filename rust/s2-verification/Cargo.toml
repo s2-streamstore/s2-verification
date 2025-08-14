@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 clap = { version = "4.5.42", features = ["derive"] }
 eyre = "0.6.12"
-streamstore = { version = "0.19.1", features = ["connector"] }
+streamstore = { version = ">=0.19", features = ["connector"] }
 tokio = { version = "1.47.1", features = ["full"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
