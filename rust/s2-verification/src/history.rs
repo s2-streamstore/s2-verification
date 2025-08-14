@@ -15,13 +15,14 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 use tonic::Code;
-use tracing::Level;
+use tracing::{warn, Level};
 use tracing::{debug, error, trace};
 
 const MAX_BATCH_BYTES: usize = 1024;
 const PER_RECORD_OVERHEAD: usize = 8;
 
 const INDEFINITE_FAILURE_BACKOFF: Duration = Duration::from_millis(100);
+const MAX_CLIENT_IDS: u64 = 20;
 
 /// Create a batch of records containing random data.
 pub fn generate_records(num_records: usize) -> eyre::Result<AppendRecordBatch> {
@@ -117,7 +118,7 @@ pub async fn fencing_token_client(
     debug!(?my_token);
     let mut deferred = Vec::new();
     let mut expected_next_seq_num = 0;
-    for sample in 0..num_ops {
+    'samples: for sample in 0..num_ops {
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if sample % 100 == 0 {
             // Attempt to set stream's token to my_token...
@@ -138,9 +139,16 @@ pub async fn fencing_token_client(
             match fin.event {
                 Event::Finish(CallFinish::AppendDefiniteFailure) => {}
                 Event::Finish(CallFinish::AppendIndefiniteFailure) => {
-                    deferred.push(fin);
-                    client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    deferred.push(fin.clone());
                     tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
+                    let client_id_candidate =
+                        client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if client_id_candidate < MAX_CLIENT_IDS {
+                        client_id = client_id_candidate;
+                    } else {
+                        warn!("max client ids reached");
+                        break 'samples;
+                    }
                 }
                 Event::Finish(CallFinish::AppendSuccess { tail }) => {
                     expected_next_seq_num = tail;
@@ -166,9 +174,15 @@ pub async fn fencing_token_client(
                         // Call failed indefinitely, so we hold on to the finish log, and also assume a new
                         // client identity, as the old one can no longer be used.
                         deferred.push(fin.clone());
-                        client_id =
-                            client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
+                        let client_id_candidate =
+                            client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if client_id_candidate < MAX_CLIENT_IDS {
+                           client_id = client_id_candidate;
+                        } else {
+                            warn!("max client ids reached");
+                           break 'samples;
+                        }
                     }
                     fin
                 }
@@ -202,7 +216,7 @@ pub async fn match_seq_num_client(
     let mut client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut deferred = Vec::new();
     let mut expected_next_seq_num = 0;
-    for sample in 0..num_ops {
+    'samples: for sample in 0..num_ops {
         debug!(?client_id, ?sample);
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let resp = match random_op() {
@@ -222,8 +236,15 @@ pub async fn match_seq_num_client(
                     // Call failed indefinitely, so we hold on to the finish log, and also assume a new
                     // client identity, as the old one can no longer be used.
                     deferred.push(fin.clone());
-                    client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
+                    let client_id_candidate =
+                        client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if client_id_candidate < MAX_CLIENT_IDS {
+                        client_id = client_id_candidate;
+                    } else {
+                        warn!("max client ids reached");
+                        break 'samples;
+                    }
                 }
                 fin
             }
@@ -254,7 +275,7 @@ pub async fn client(
 ) -> eyre::Result<Vec<LabeledEvent>> {
     let mut client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut deferred = Vec::new();
-    for sample in 0..num_ops {
+    'samples: for sample in 0..num_ops {
         debug!(?client_id, ?sample);
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match random_op() {
@@ -273,9 +294,16 @@ pub async fn client(
                 if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
                     // Call failed indefinitely, so we hold on to the finish log, and also assume a new
                     // client identity, as the old one can no longer be used.
-                    deferred.push(fin);
-                    client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    deferred.push(fin.clone());
                     tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
+                    let client_id_candidate =
+                        client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if client_id_candidate < MAX_CLIENT_IDS {
+                        client_id = client_id_candidate;
+                    } else {
+                        warn!("max client ids reached");
+                        break 'samples;
+                    }
                 }
             }
             Op::Read => {
