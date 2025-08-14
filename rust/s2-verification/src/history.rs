@@ -138,8 +138,8 @@ pub async fn fencing_token_client(
             match fin.event {
                 Event::Finish(CallFinish::AppendDefiniteFailure) => {}
                 Event::Finish(CallFinish::AppendIndefiniteFailure) => {
-                    client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     deferred.push(fin);
+                    client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
                 }
                 Event::Finish(CallFinish::AppendSuccess { tail }) => {
@@ -165,9 +165,9 @@ pub async fn fencing_token_client(
                     if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
                         // Call failed indefinitely, so we hold on to the finish log, and also assume a new
                         // client identity, as the old one can no longer be used.
+                        deferred.push(fin.clone());
                         client_id =
                             client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        deferred.push(fin.clone());
                         tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
                     }
                     fin
