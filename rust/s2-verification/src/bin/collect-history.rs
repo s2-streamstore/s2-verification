@@ -182,6 +182,7 @@ async fn main() -> eyre::Result<()> {
     }
     let deferred = futs.collect::<Vec<_>>().await;
     debug!(?deferred, "all clients finished");
+    
     for result in deferred {
         for fin in result? {
             assert!(matches!(fin.event, Event::Finish(CallFinish::AppendIndefiniteFailure)));
