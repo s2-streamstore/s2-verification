@@ -6,7 +6,8 @@ use s2::client::{AppendRetryPolicy, ClientError, S2Endpoints};
 use s2::types::{CreateStreamRequest, ReadLimit, ReadOutput, ReadRequest, ReadStart};
 use s2::{Client, ClientConfig, types};
 use s2_verification::history::{
-    client, fencing_token_client, initialize_tail, match_seq_num_client,
+    CallFinish, Event, LabeledEvent, client, fencing_token_client, initialize_tail,
+    match_seq_num_client,
 };
 use std::env;
 use std::sync::Arc;
@@ -88,6 +89,7 @@ async fn main() -> eyre::Result<()> {
     };
 
     let (history_tx, mut history_rx) = tokio::sync::mpsc::unbounded_channel();
+    let client_ids = Arc::new(AtomicU64::new(1));
     let op_ids = Arc::new(AtomicU64::new(0));
 
     let stream_client = Client::new(config.clone())
@@ -147,41 +149,52 @@ async fn main() -> eyre::Result<()> {
     });
 
     debug!("starting concurrent clients");
-    let mut futs = FuturesUnordered::new();
-    for client_id in 0..num_concurrent_clients {
+    let futs = FuturesUnordered::new();
+    for _client_id in 0..num_concurrent_clients {
         let stream_client = Client::new(config.clone())
             .basin_client(basin.clone())
             .stream_client(stream);
 
-        let fut: std::pin::Pin<Box<dyn std::future::Future<Output = eyre::Result<()>> + Send>> =
-            match workflow {
-                Workflow::Regular => Box::pin(client(
-                    num_ops_per_client,
-                    stream_client,
-                    client_id,
-                    op_ids.clone(),
-                    history_tx.clone(),
-                )),
-                Workflow::MatchSeqNum => Box::pin(match_seq_num_client(
-                    num_ops_per_client,
-                    stream_client,
-                    client_id,
-                    op_ids.clone(),
-                    history_tx.clone(),
-                )),
-                Workflow::Fencing => Box::pin(fencing_token_client(
-                    num_ops_per_client,
-                    stream_client,
-                    client_id,
-                    op_ids.clone(),
-                    history_tx.clone(),
-                )),
-            };
+        let fut: std::pin::Pin<
+            Box<dyn std::future::Future<Output = eyre::Result<Vec<LabeledEvent>>> + Send>,
+        > = match workflow {
+            Workflow::Regular => Box::pin(client(
+                num_ops_per_client,
+                stream_client,
+                client_ids.clone(),
+                op_ids.clone(),
+                history_tx.clone(),
+            )),
+            Workflow::MatchSeqNum => Box::pin(match_seq_num_client(
+                num_ops_per_client,
+                stream_client,
+                client_ids.clone(),
+                op_ids.clone(),
+                history_tx.clone(),
+            )),
+            Workflow::Fencing => Box::pin(fencing_token_client(
+                num_ops_per_client,
+                stream_client,
+                client_ids.clone(),
+                op_ids.clone(),
+                history_tx.clone(),
+            )),
+        };
 
         futs.push(fut);
     }
-    while let Some(_f) = futs.next().await {}
-    debug!("all clients finished");
+    let deferred = futs.collect::<Vec<_>>().await;
+    debug!(?deferred, "all clients finished");
+
+    for result in deferred {
+        for fin in result? {
+            assert!(matches!(
+                fin.event,
+                Event::Finish(CallFinish::AppendIndefiniteFailure)
+            ));
+            history_tx.send(fin)?;
+        }
+    }
 
     // tx drop signals to the writer task that it can stop
     drop(history_tx);
