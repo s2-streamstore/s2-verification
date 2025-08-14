@@ -116,7 +116,7 @@ fn random_op() -> Op {
 }
 
 /// Handle an indefinite failure by deferring the event and attempting to rotate to a new client ID.
-/// 
+///
 /// Returns `Some(new_client_id)` if a new client ID was successfully acquired,
 /// or `None` if the maximum number of client IDs has been reached (caller should break).
 async fn handle_indefinite_failure(
@@ -181,7 +181,9 @@ pub async fn fencing_token_client(
             match fin.event {
                 Event::Finish(CallFinish::AppendDefiniteFailure) => {}
                 Event::Finish(CallFinish::AppendIndefiniteFailure) => {
-                    if let Some(new_client_id) = handle_indefinite_failure(&fin, &mut deferred, &client_id_atomic).await {
+                    if let Some(new_client_id) =
+                        handle_indefinite_failure(&fin, &mut deferred, &client_id_atomic).await
+                    {
                         client_id = new_client_id;
                     } else {
                         break 'samples;
@@ -208,7 +210,9 @@ pub async fn fencing_token_client(
                     )
                     .await?;
                     if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
-                        if let Some(new_client_id) = handle_indefinite_failure(&fin, &mut deferred, &client_id_atomic).await {
+                        if let Some(new_client_id) =
+                            handle_indefinite_failure(&fin, &mut deferred, &client_id_atomic).await
+                        {
                             client_id = new_client_id;
                         } else {
                             break 'samples;
@@ -270,7 +274,9 @@ pub async fn match_seq_num_client(
                 )
                 .await?;
                 if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
-                    if let Some(new_client_id) = handle_indefinite_failure(&fin, &mut deferred, &client_id_atomic).await {
+                    if let Some(new_client_id) =
+                        handle_indefinite_failure(&fin, &mut deferred, &client_id_atomic).await
+                    {
                         client_id = new_client_id;
                     } else {
                         break 'samples;
@@ -329,7 +335,9 @@ pub async fn client(
                 )
                 .await?;
                 if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
-                    if let Some(new_client_id) = handle_indefinite_failure(&fin, &mut deferred, &client_id_atomic).await {
+                    if let Some(new_client_id) =
+                        handle_indefinite_failure(&fin, &mut deferred, &client_id_atomic).await
+                    {
                         client_id = new_client_id;
                     } else {
                         break 'samples;
