@@ -155,6 +155,8 @@ pub async fn fencing_token_client(
     op_id_atomic: Arc<AtomicU64>,
     history_tx: UnboundedSender<LabeledEvent>,
 ) -> eyre::Result<Vec<LabeledEvent>> {
+    const ATTEMPT_TO_SET_FENCE_TOKEN_EVERY: usize = 100;
+
     let mut client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let my_token = FencingToken::generate(6)?;
     debug!(?my_token);
@@ -162,7 +164,7 @@ pub async fn fencing_token_client(
     let mut expected_next_seq_num = 0;
     'samples: for sample in 0..num_ops {
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if sample % 100 == 0 {
+        if sample % ATTEMPT_TO_SET_FENCE_TOKEN_EVERY == 0 {
             // Attempt to set stream's token to my_token...
             let mut set_token_batch = AppendRecordBatch::new();
             set_token_batch
