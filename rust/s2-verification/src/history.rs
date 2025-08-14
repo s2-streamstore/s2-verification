@@ -11,6 +11,7 @@ use s2::{
 };
 use serde::Serialize;
 use std::sync::{Arc, atomic::AtomicU64};
+use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 use tonic::Code;
@@ -19,6 +20,8 @@ use tracing::{debug, error, trace};
 
 const MAX_BATCH_BYTES: usize = 1024;
 const PER_RECORD_OVERHEAD: usize = 8;
+
+const INDEFINITE_FAILURE_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Create a batch of records containing random data.
 pub fn generate_records(num_records: usize) -> eyre::Result<AppendRecordBatch> {
@@ -137,6 +140,7 @@ pub async fn fencing_token_client(
                 Event::Finish(CallFinish::AppendIndefiniteFailure) => {
                     client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     deferred.push(fin);
+                    tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
                 }
                 Event::Finish(CallFinish::AppendSuccess { tail }) => {
                     expected_next_seq_num = tail;
@@ -161,9 +165,10 @@ pub async fn fencing_token_client(
                     if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
                         // Call failed indefinitely, so we hold on to the finish log, and also assume a new
                         // client identity, as the old one can no longer be used.
-                        deferred.push(fin.clone());
                         client_id =
                             client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        deferred.push(fin.clone());
+                        tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
                     }
                     fin
                 }
@@ -218,6 +223,7 @@ pub async fn match_seq_num_client(
                     // client identity, as the old one can no longer be used.
                     deferred.push(fin.clone());
                     client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
                 }
                 fin
             }
@@ -269,6 +275,7 @@ pub async fn client(
                     // client identity, as the old one can no longer be used.
                     deferred.push(fin);
                     client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
                 }
             }
             Op::Read => {
