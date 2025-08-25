@@ -1,5 +1,4 @@
 use antithesis_sdk::random::AntithesisRng;
-use xxhash_rust::xxh3::xxh3_64;
 use eyre::{OptionExt, eyre};
 use rand::Rng;
 use s2::types::{CommandRecord, FencingToken};
@@ -17,6 +16,7 @@ use tokio_stream::StreamExt;
 use tonic::Code;
 use tracing::{Level, warn};
 use tracing::{debug, error, trace};
+use xxhash_rust::xxh3::xxh3_64;
 
 const MAX_BATCH_BYTES: usize = 1024;
 const PER_RECORD_OVERHEAD: usize = 8;

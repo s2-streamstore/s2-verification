@@ -1,5 +1,4 @@
 use clap::{Parser, ValueEnum};
-use xxhash_rust::xxh3::xxh3_64;
 use eyre::eyre;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -20,6 +19,7 @@ use tonic::codegen::http;
 use tracing::{debug, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use xxhash_rust::xxh3::xxh3_64;
 
 #[derive(ValueEnum, Clone, Debug)]
 enum Workflow {
