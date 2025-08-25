@@ -527,7 +527,7 @@ func main() {
 		line := scanner.Bytes()
 		if err := json.Unmarshal(line, &r); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to unmarshal line: %v\nline: %s\n", err, line)
-			continue
+			os.Exit(1)
 		}
 
 		switch {
