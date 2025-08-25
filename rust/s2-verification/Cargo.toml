@@ -17,5 +17,5 @@ futures = "0.3.31"
 serde_json = "1.0.141"
 antithesis_sdk = "0.2.6"
 rand = "0.8.5" # required for antithesis_sdk rand compatibility
-crc32fast = "1.5.0"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 

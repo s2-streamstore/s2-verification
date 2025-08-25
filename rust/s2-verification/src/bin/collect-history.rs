@@ -19,6 +19,7 @@ use tonic::codegen::http;
 use tracing::{debug, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use xxhash_rust::xxh3::xxh3_64;
 
 #[derive(ValueEnum, Clone, Debug)]
 enum Workflow {
@@ -104,12 +105,12 @@ async fn main() -> eyre::Result<()> {
         ReadOutput::Batch(batch) => {
             let last = batch.records.last().expect("batch has at least one record");
             let tail = last.seq_num + 1;
-            Some((tail, crc32fast::hash(last.body.as_ref())))
+            Some((tail, xxh3_64(last.body.as_ref())))
         }
         ReadOutput::NextSeqNum(0) => None,
         _ => return Err(eyre!("impossible to rectify")),
     };
-    if let Some((tail, crc)) = rectify {
+    if let Some((tail, xxh3)) = rectify {
         info!(
             "check-tail indicates stream is not empty, inserting a starter append event to rectify"
         );
@@ -117,7 +118,7 @@ async fn main() -> eyre::Result<()> {
             history_tx.clone(),
             op_ids.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             tail,
-            crc,
+            xxh3,
         )
         .await?;
     }
