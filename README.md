@@ -2,9 +2,9 @@
 
 This repo contains a [Porcupine](https://github.com/anishathalye/porcupine) model for verifying linearizability of the core [s2.dev](https://s2.dev/) service, as well as a binary for collecting concurrent client logs which can be provided to that model.
 
-We use this internally as a part of our custom [turmoil](https://github.com/tokio-rs/turmoil)-based [deterministic simulation testing framework](https://s2.dev/blog/dst), as well as on workloads that we run on the [Antithesis](https://antithesis.com/) platform. In these setups, we subject (simulated) S2 to a range of stresses, and assert on different invariants (maintaining linearizability being a basic one of them).
+We use this internally as a part of our custom [turmoil](https://github.com/tokio-rs/turmoil)-based [deterministic simulation testing framework](https://s2.dev/blog/dst), as well as on workloads that we run on the [Antithesis](https://antithesis.com/) platform. In these setups, we subject (simulated) S2 to a range of stresses, and assert on different invariants (maintaining linearizability being a basic one of them). More context on this can be found in [this blog post](https://s2.dev/blog/linearizability).
 
-A concurrent history can also be collected against the prod S2 service, and evaluated with Porcupine.
+A concurrent history can also be collected against the prod S2 service (or self-hosted [s2-lite](https://github.com/s2-streamstore/s2)), and evaluated with Porcupine.
 
 ## Installing
 
@@ -127,4 +127,37 @@ make install-go
 # invoke the binary with your history jsonl file
 s2-porcupine \
   -file="./data/records.1754354415.jsonl"
+```
+
+## Running against `s2-lite`
+
+[s2-lite](https://github.com/s2-streamstore/s2) is an open-source, self-hosted S2.
+
+Start `s2-lite` in a Docker container:
+
+```bash
+docker run -p 8080:80 ghcr.io/s2-streamstore/s2-lite
+```
+
+Create a new basin, gather history, and check it against the model:
+
+```bash
+# These vars point to the local instance
+export S2_ACCOUNT_ENDPOINT="http://localhost:8080"
+export S2_BASIN_ENDPOINT="http://localhost:8080"
+# No token creation is needed for s2-lite
+export S2_ACCESS_TOKEN="redundant"
+
+s2 create-basin linearizability-test
+
+out_path=$(
+  cargo run -- \
+    linearizability-test \
+    t1 \
+    --num-concurrent-clients 5 \
+    --num-ops-per-client 100 \
+    --workflow regular 
+)
+  
+s2-porcupine -file="$out_path"
 ```

@@ -1,19 +1,17 @@
 use antithesis_sdk::random::AntithesisRng;
-use eyre::{OptionExt, eyre};
 use rand::Rng;
-use s2::types::{CommandRecord, FencingToken};
-use s2::{
-    StreamClient, Streaming,
-    client::ClientError,
-    types,
-    types::{AppendInput, AppendRecord, AppendRecordBatch, MeteredBytes, ReadOutput, ReadStart},
+use s2_sdk::{
+    S2Stream,
+    types::{
+        AppendInput, AppendRecord, AppendRecordBatch, CommandRecord, FencingToken, MeteredBytes,
+        ReadBatch, ReadFrom, ReadInput, ReadLimits, ReadStart, ReadStop, S2Error, Streaming,
+    },
 };
 use serde::Serialize;
 use std::sync::{Arc, atomic::AtomicU64};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
-use tonic::Code;
 use tracing::{Level, warn};
 use tracing::{debug, error, trace};
 use xxhash_rust::xxh3::xxh3_64;
@@ -33,33 +31,38 @@ const INDEFINITE_FAILURE_BACKOFF: Duration = Duration::from_millis(1000);
 /// harder it is to verify linearizability in a reasonable amount of time.
 const MAX_CLIENT_IDS: u64 = 20;
 
+pub struct GeneratedBatch {
+    batch: AppendRecordBatch,
+    last_xxh3: u64,
+}
+
 /// Create a batch of records containing random data.
-pub fn generate_records(num_records: usize) -> eyre::Result<AppendRecordBatch> {
-    let mut records = AppendRecordBatch::with_max_capacity(num_records);
+/// Returns the batch and the xxh3 hash of the last record's body.
+pub fn generate_records(num_records: usize) -> eyre::Result<GeneratedBatch> {
+    let mut records = Vec::new();
     let mut batch_bytes: usize = 0;
+    let mut last_xxh3: u64 = 0;
     let mut rng = AntithesisRng;
 
-    while !records.is_full() && batch_bytes + PER_RECORD_OVERHEAD < MAX_BATCH_BYTES {
+    while records.len() < num_records && batch_bytes + PER_RECORD_OVERHEAD < MAX_BATCH_BYTES {
         let record_body_budget = MAX_BATCH_BYTES - batch_bytes - PER_RECORD_OVERHEAD;
 
         let size = rng.gen_range(1..=record_body_budget);
         let mut body = vec![0u8; size];
         rng.fill(&mut body[..]);
 
-        let record = AppendRecord::new(body).expect("capacity");
-        let metered_size = record.metered_bytes();
-        if let Err(e) = records.push(record) {
-            error!(?e, "failed to push record");
-            break;
-        }
+        // Compute hash before creating record
+        last_xxh3 = xxh3_64(&body);
 
-        batch_bytes += metered_size as usize;
+        let record = AppendRecord::new(body)?;
+        let metered_size = record.metered_bytes();
+
+        batch_bytes += metered_size;
+        records.push(record);
     }
 
-    assert!(records.len() <= num_records);
-    assert!(records.metered_bytes() <= MAX_BATCH_BYTES as u64);
-
-    Ok(records)
+    let batch = AppendRecordBatch::try_from_iter(records)?;
+    Ok(GeneratedBatch { batch, last_xxh3 })
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -150,7 +153,7 @@ async fn handle_indefinite_failure(
 /// These correspond to `AppendIndefiniteFailure` events.
 pub async fn fencing_token_client(
     num_ops: usize,
-    stream: StreamClient,
+    stream: S2Stream,
     client_id_atomic: Arc<AtomicU64>,
     op_id_atomic: Arc<AtomicU64>,
     history_tx: UnboundedSender<LabeledEvent>,
@@ -166,10 +169,10 @@ pub async fn fencing_token_client(
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if sample % ATTEMPT_TO_SET_FENCE_TOKEN_EVERY == 0 {
             // Attempt to set stream's token to my_token...
-            let mut set_token_batch = AppendRecordBatch::new();
-            set_token_batch
-                .push(CommandRecord::fence(my_token.clone()))
-                .map_err(|_| eyre!("failed to push fencing token"))?;
+            let fence_record: AppendRecord = CommandRecord::fence(my_token.clone()).into();
+            // For fence commands, the body is the token bytes - compute hash
+            let token_xxh3 = xxh3_64(my_token.as_bytes());
+            let set_token_batch = AppendRecordBatch::try_from_iter([fence_record])?;
             let fin = append(
                 history_tx.clone(),
                 stream.clone(),
@@ -178,6 +181,8 @@ pub async fn fencing_token_client(
                 op_id,
                 Some(expected_next_seq_num),
                 None,
+                Some(my_token.to_string()),
+                token_xxh3,
             )
             .await?;
             match fin.event {
@@ -200,7 +205,8 @@ pub async fn fencing_token_client(
             debug!(?client_id, ?sample);
             let resp = match random_op() {
                 Op::Append => {
-                    let batch = generate_records(AntithesisRng.gen_range(1..1000))?;
+                    let GeneratedBatch { batch, last_xxh3 } =
+                        generate_records(AntithesisRng.gen_range(1..1000))?;
                     let fin = append(
                         history_tx.clone(),
                         stream.clone(),
@@ -209,6 +215,8 @@ pub async fn fencing_token_client(
                         op_id,
                         None,
                         Some(my_token.clone()),
+                        None,
+                        last_xxh3,
                     )
                     .await?;
                     if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
@@ -251,7 +259,7 @@ pub async fn fencing_token_client(
 /// These correspond to `AppendIndefiniteFailure` events.
 pub async fn match_seq_num_client(
     num_ops: usize,
-    stream: StreamClient,
+    stream: S2Stream,
     client_id_atomic: Arc<AtomicU64>,
     op_id_atomic: Arc<AtomicU64>,
     history_tx: UnboundedSender<LabeledEvent>,
@@ -264,7 +272,8 @@ pub async fn match_seq_num_client(
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let resp = match random_op() {
             Op::Append => {
-                let batch = generate_records(AntithesisRng.gen_range(1..1000))?;
+                let GeneratedBatch { batch, last_xxh3 } =
+                    generate_records(AntithesisRng.gen_range(1..1000))?;
                 let fin = append(
                     history_tx.clone(),
                     stream.clone(),
@@ -273,6 +282,8 @@ pub async fn match_seq_num_client(
                     op_id,
                     Some(expected_next_seq_num),
                     None,
+                    None,
+                    last_xxh3,
                 )
                 .await?;
                 if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
@@ -313,7 +324,7 @@ pub async fn match_seq_num_client(
 /// These correspond to `AppendIndefiniteFailure` events.
 pub async fn client(
     num_ops: usize,
-    stream: StreamClient,
+    stream: S2Stream,
     client_id_atomic: Arc<AtomicU64>,
     op_id_atomic: Arc<AtomicU64>,
     history_tx: UnboundedSender<LabeledEvent>,
@@ -325,7 +336,8 @@ pub async fn client(
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match random_op() {
             Op::Append => {
-                let batch = generate_records(AntithesisRng.gen_range(1..1000))?;
+                let GeneratedBatch { batch, last_xxh3 } =
+                    generate_records(AntithesisRng.gen_range(1..1000))?;
                 let fin = append(
                     history_tx.clone(),
                     stream.clone(),
@@ -334,6 +346,8 @@ pub async fn client(
                     op_id,
                     None,
                     None,
+                    None,
+                    last_xxh3,
                 )
                 .await?;
                 if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
@@ -359,22 +373,27 @@ pub async fn client(
 }
 
 #[tracing::instrument(level = Level::TRACE, skip_all)]
-async fn resolve_read_tail(mut stream: Streaming<ReadOutput>) -> eyre::Result<CallFinish> {
+async fn resolve_read_tail(mut stream: Streaming<ReadBatch>) -> eyre::Result<CallFinish> {
     let mut tail = 0;
     let mut xxh3 = 0;
     while let Some(resp) = stream.next().await {
         trace!(?resp, "read response");
         match resp {
-            Ok(ReadOutput::Batch(batch)) => {
-                let Some(last) = batch.records.last() else {
-                    return Err(eyre!("received empty batch"));
-                };
-                xxh3 = xxh3_64(last.body.as_ref());
-                tail = last.seq_num + 1;
-            }
-            Ok(ReadOutput::NextSeqNum(nsn)) => {
-                trace!(nsn, "next_seq_num");
-                return Ok(CallFinish::ReadSuccess { tail: nsn, xxh3 });
+            Ok(batch) => {
+                // Check if we got a tail position (indicates end of stream)
+                if let Some(tail_pos) = batch.tail
+                    && batch.records.is_empty()
+                {
+                    // No records but we have tail - stream is caught up
+                    return Ok(CallFinish::ReadSuccess {
+                        tail: tail_pos.seq_num,
+                        xxh3,
+                    });
+                }
+                if let Some(last) = batch.records.last() {
+                    xxh3 = xxh3_64(last.body.as_ref());
+                    tail = last.seq_num + 1;
+                }
             }
             Err(e) => {
                 error!(?e, "read error");
@@ -388,7 +407,7 @@ async fn resolve_read_tail(mut stream: Streaming<ReadOutput>) -> eyre::Result<Ca
 #[tracing::instrument(level = Level::TRACE, skip(history_tx, stream))]
 async fn read_session(
     history_tx: UnboundedSender<LabeledEvent>,
-    stream: StreamClient,
+    stream: S2Stream,
     client_id: u64,
     op_id: u64,
 ) -> eyre::Result<LabeledEvent> {
@@ -399,12 +418,12 @@ async fn read_session(
     })?;
 
     let read_session = stream
-        .read_session(types::ReadSessionRequest {
-            start: ReadStart::TailOffset(1),
-            // Read must include a limit, otherwise we will enter a tailing session.
-            limit: types::ReadLimit::new().with_count(u64::MAX),
-            ..Default::default()
-        })
+        .read_session(
+            ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::TailOffset(1)))
+                // Read must include a limit, otherwise we will enter a tailing session.
+                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(usize::MAX))),
+        )
         .await;
 
     let finish = match read_session {
@@ -434,7 +453,7 @@ async fn read_session(
 #[tracing::instrument(level = Level::TRACE, skip(history_tx, stream))]
 async fn check_tail(
     history_tx: UnboundedSender<LabeledEvent>,
-    stream: StreamClient,
+    stream: S2Stream,
     client_id: u64,
     op_id: u64,
 ) -> eyre::Result<LabeledEvent> {
@@ -463,36 +482,22 @@ async fn check_tail(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(level = Level::TRACE, skip(history_tx, stream, records))]
 async fn append(
     history_tx: UnboundedSender<LabeledEvent>,
-    stream: StreamClient,
+    stream: S2Stream,
     records: AppendRecordBatch,
     client_id: u64,
     op_id: u64,
     match_seq_num: Option<u64>,
     fencing_token: Option<FencingToken>,
+    // If this append is setting a fencing token, pass the token string here for logging
+    set_fencing_token: Option<String>,
+    // The xxh3 hash of the last record body (caller must compute since fields are private)
+    last_record_xxh3: u64,
 ) -> eyre::Result<LabeledEvent> {
-    let mut set_fencing_token = None;
-    if records.len() == 1
-        && let Some(rec) = records.as_ref().iter().next()
-        && let Some(header) = rec.headers().first()
-        && header.name.is_empty()
-        && header.value == "fence"
-    {
-        let token = String::from_utf8(rec.body().to_vec())?;
-        set_fencing_token = Some(token);
-    }
-
-    // Grab xxHash3 of last record in batch.
-    let xxh3 = xxh3_64(
-        records
-            .as_ref()
-            .iter()
-            .last()
-            .ok_or_eyre("no records in batch")?
-            .body(),
-    );
+    let xxh3 = last_record_xxh3;
 
     let start = CallStart::Append {
         num_records: records.len() as u64,
@@ -520,25 +525,22 @@ async fn append(
         Ok(ack) => CallFinish::AppendSuccess {
             tail: ack.end.seq_num,
         },
-        Err(e) => match e {
-            ClientError::Conversion(_) => CallFinish::AppendDefiniteFailure,
-            ClientError::Service(status)
-                if matches!(
-                    status.code(),
-                    Code::InvalidArgument
-                        | Code::NotFound
-                        | Code::AlreadyExists
-                        | Code::PermissionDenied
-                        | Code::ResourceExhausted
-                        | Code::FailedPrecondition
-                        | Code::Aborted
-                        | Code::OutOfRange
-                        | Code::Unimplemented
-                        | Code::Unauthenticated
-                ) =>
-            {
-                CallFinish::AppendDefiniteFailure
+        Err(e) => match &e {
+            // Validation errors are definite failures
+            S2Error::Validation(_) => CallFinish::AppendDefiniteFailure,
+            // Append condition failures (fencing token mismatch, seq num mismatch) are definite
+            S2Error::AppendConditionFailed(_) => CallFinish::AppendDefiniteFailure,
+            // Server errors - check the code for definite vs indefinite
+            S2Error::Server(err) => {
+                match err.code.as_str() {
+                    // Re: table on side-effect possibilities at <https://s2.dev/docs/api/error-codes>
+                    "request_timeout" | "other" | "storage" | "upstream_timeout" => {
+                        CallFinish::AppendIndefiniteFailure
+                    }
+                    _ => CallFinish::AppendDefiniteFailure,
+                }
             }
+            // Client errors and other errors are indefinite (might succeed on retry)
             _ => CallFinish::AppendIndefiniteFailure,
         },
     };
