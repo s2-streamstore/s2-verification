@@ -128,3 +128,36 @@ make install-go
 s2-porcupine \
   -file="./data/records.1754354415.jsonl"
 ```
+
+## Running aginst `s2-lite`
+
+[s2-lite](https://github.com/s2-streamstore/s2) is an open-source, self-hosted S2.
+
+Start `s2-lite` in a Docker container:
+
+```bash
+docker run -p 8080:80 ghcr.io/s2-streamstore/s2-lite
+```
+
+Create a new basin, gather history, and check it against the model:
+
+```bash
+# These vars point to the local instance
+export S2_ACCOUNT_ENDPOINT="http://localhost:8080"
+export S2_BASIN_ENDPOINT="http://localhost:8080"
+# No token creation is needed for s2-lite
+export S2_ACCESS_TOKEN="redundant"
+
+s2 create-basin linearizability-test
+
+out_path=$(
+  cargo run -- \
+    linearizability-test \
+    t1 \
+    --num-concurrent-clients 5 \
+    --num-ops-per-client 100 \
+    --workflow regular 
+)
+  
+s2-porcupine -file="$out_path"
+```

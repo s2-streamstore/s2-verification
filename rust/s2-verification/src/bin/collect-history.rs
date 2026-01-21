@@ -2,9 +2,13 @@ use clap::{Parser, ValueEnum};
 use eyre::eyre;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use s2::client::{AppendRetryPolicy, ClientError, S2Endpoints};
-use s2::types::{CreateStreamRequest, ReadLimit, ReadOutput, ReadRequest, ReadStart};
-use s2::{Client, ClientConfig, types};
+use s2_sdk::{
+    S2,
+    types::{
+        AppendRetryPolicy, BasinName, CreateStreamInput, ReadFrom, ReadInput, ReadLimits,
+        ReadStart, ReadStop, RetryConfig, S2Config, S2Endpoints, S2Error, StreamName,
+    },
+};
 use s2_verification::history::{
     CallFinish, Event, LabeledEvent, client, fencing_token_client, initialize_tail,
     match_seq_num_client,
@@ -14,8 +18,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
-use tonic::Code;
-use tonic::codegen::http;
 use tracing::{debug, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -62,30 +64,25 @@ async fn main() -> eyre::Result<()> {
         workflow,
     } = Args::parse();
 
-    let disable_tls = std::env::var("S2_DISABLE_TLS")
-        .ok()
-        .and_then(|val| val.to_lowercase().parse::<bool>().ok())
-        .unwrap_or(false);
+    let basin: BasinName = basin.parse()?;
+    let stream: StreamName = stream.parse()?;
 
-    let basin = types::BasinName::try_from(basin)?;
-    let stream: &'static str = stream.leak();
+    let custom_endpoints = S2Endpoints::from_env().ok();
+    let mut config = S2Config::new(env::var("S2_ACCESS_TOKEN")?)
+        .with_retry(RetryConfig::new().with_append_retry_policy(AppendRetryPolicy::NoSideEffects));
 
-    let config = ClientConfig::new(env::var("S2_ACCESS_TOKEN")?)
-        .with_endpoints(S2Endpoints::from_env().map_err(|e| eyre::eyre!(e))?)
-        .with_append_retry_policy(AppendRetryPolicy::NoSideEffects)
-        .with_uri_scheme(if disable_tls {
-            http::uri::Scheme::HTTP
-        } else {
-            http::uri::Scheme::HTTPS
-        });
+    if let Some(endpoints) = custom_endpoints {
+        config = config.with_endpoints(endpoints);
+    }
 
-    let basin_client = Client::new(config.clone()).basin_client(basin.clone());
+    let s2 = S2::new(config.clone())?;
+    let basin_client = s2.basin(basin.clone());
     let _stream_exists = match basin_client
-        .create_stream(CreateStreamRequest::new(stream))
+        .create_stream(CreateStreamInput::new(stream.clone()))
         .await
     {
         Ok(_) => true,
-        Err(ClientError::Service(status)) => status.code() == Code::AlreadyExists,
+        Err(S2Error::Server(e)) if e.code.as_str() == "resource_already_exists" => true,
         Err(e) => return Err(eyre!(e)),
     };
 
@@ -93,27 +90,37 @@ async fn main() -> eyre::Result<()> {
     let client_ids = Arc::new(AtomicU64::new(1));
     let op_ids = Arc::new(AtomicU64::new(0));
 
-    let stream_client = Client::new(config.clone())
-        .basin_client(basin.clone())
-        .stream_client(stream);
+    let s2 = S2::new(config.clone())?;
+    let stream_client = s2.basin(basin.clone()).stream(stream.clone());
     let _resp = stream_client.check_tail().await?;
-    let resp = stream_client
-        .read(ReadRequest::new(ReadStart::TailOffset(1)).with_limit(ReadLimit::new().with_count(1)))
-        .await?;
+    let batch = stream_client
+        .read(
+            ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::TailOffset(1)))
+                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(1))),
+        )
+        .await;
 
-    let rectify = match resp {
-        ReadOutput::Batch(batch) => {
+    // See if the specified stream has been written to; if it has, grab the tail and hash.
+    //
+    // Note that we are not using `check_tail` since we need access not just to the tail, but
+    // also the actual record's content.
+    let rectify = match batch {
+        Ok(batch) => {
             let last = batch.records.last().expect("batch has at least one record");
             let tail = last.seq_num + 1;
             Some((tail, xxh3_64(last.body.as_ref())))
         }
-        ReadOutput::NextSeqNum(0) => None,
-        _ => return Err(eyre!("impossible to rectify")),
+        Err(S2Error::ReadUnwritten(position)) => {
+            assert_eq!(position.seq_num, 0);
+            assert_eq!(position.timestamp, 0);
+            None
+        }
+        Err(e) => return Err(eyre!(e)),
     };
+
     if let Some((tail, xxh3)) = rectify {
-        info!(
-            "check-tail indicates stream is not empty, inserting a starter append event to rectify"
-        );
+        info!("stream is not empty, inserting a starter append event to rectify");
         initialize_tail(
             history_tx.clone(),
             op_ids.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -146,15 +153,16 @@ async fn main() -> eyre::Result<()> {
                 .expect("write to writer");
         }
         writer.flush().await.expect("flush writer");
-        info!(path, "writer finished");
+        info!("writer finished");
+
+        println!("{path}")
     });
 
     debug!("starting concurrent clients");
     let futs = FuturesUnordered::new();
     for _client_id in 0..num_concurrent_clients {
-        let stream_client = Client::new(config.clone())
-            .basin_client(basin.clone())
-            .stream_client(stream);
+        let s2 = S2::new(config.clone())?;
+        let stream_client = s2.basin(basin.clone()).stream(stream.clone());
 
         let fut: std::pin::Pin<
             Box<dyn std::future::Future<Output = eyre::Result<Vec<LabeledEvent>>> + Send>,
