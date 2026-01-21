@@ -532,12 +532,12 @@ async fn append(
             S2Error::AppendConditionFailed(_) => CallFinish::AppendDefiniteFailure,
             // Server errors - check the code for definite vs indefinite
             S2Error::Server(err) => {
-                // Re: table on side-effect possibilities at <https://s2.dev/docs/api/error-codes>
-                let side_effecty = ["request_timeout", "other", "storage", "upstream_timeout"];
-                if side_effecty.iter().any(|c| err.code == *c) {
-                    CallFinish::AppendIndefiniteFailure
-                } else {
-                    CallFinish::AppendDefiniteFailure
+                match err.code.as_str() {
+                    // Re: table on side-effect possibilities at <https://s2.dev/docs/api/error-codes>
+                    "request_timeout" | "other" | "storage" | "upstream_timeout" => {
+                        CallFinish::AppendIndefiniteFailure
+                    }
+                    _ => CallFinish::AppendDefiniteFailure,
                 }
             }
             // Client errors and other errors are indefinite (might succeed on retry)

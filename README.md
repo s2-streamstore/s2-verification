@@ -2,9 +2,9 @@
 
 This repo contains a [Porcupine](https://github.com/anishathalye/porcupine) model for verifying linearizability of the core [s2.dev](https://s2.dev/) service, as well as a binary for collecting concurrent client logs which can be provided to that model.
 
-We use this internally as a part of our custom [turmoil](https://github.com/tokio-rs/turmoil)-based [deterministic simulation testing framework](https://s2.dev/blog/dst), as well as on workloads that we run on the [Antithesis](https://antithesis.com/) platform. In these setups, we subject (simulated) S2 to a range of stresses, and assert on different invariants (maintaining linearizability being a basic one of them).
+We use this internally as a part of our custom [turmoil](https://github.com/tokio-rs/turmoil)-based [deterministic simulation testing framework](https://s2.dev/blog/dst), as well as on workloads that we run on the [Antithesis](https://antithesis.com/) platform. In these setups, we subject (simulated) S2 to a range of stresses, and assert on different invariants (maintaining linearizability being a basic one of them). More context on this can be found in [this blog post](https://s2.dev/blog/linearizability).
 
-A concurrent history can also be collected against the prod S2 service, and evaluated with Porcupine.
+A concurrent history can also be collected against the prod S2 service (or self-hosted [s2-lite](https://github.com/s2-streamstore/s2)), and evaluated with Porcupine.
 
 ## Installing
 
@@ -129,7 +129,7 @@ s2-porcupine \
   -file="./data/records.1754354415.jsonl"
 ```
 
-## Running aginst `s2-lite`
+## Running against `s2-lite`
 
 [s2-lite](https://github.com/s2-streamstore/s2) is an open-source, self-hosted S2.
 

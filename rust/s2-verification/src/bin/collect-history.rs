@@ -155,7 +155,7 @@ async fn main() -> eyre::Result<()> {
         writer.flush().await.expect("flush writer");
         info!("writer finished");
 
-        println!("{path}")
+        println!("{path}");
     });
 
     debug!("starting concurrent clients");
