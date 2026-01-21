@@ -205,7 +205,8 @@ pub async fn fencing_token_client(
             debug!(?client_id, ?sample);
             let resp = match random_op() {
                 Op::Append => {
-                    let GeneratedBatch {batch, last_xxh3} = generate_records(AntithesisRng.gen_range(1..1000))?;
+                    let GeneratedBatch { batch, last_xxh3 } =
+                        generate_records(AntithesisRng.gen_range(1..1000))?;
                     let fin = append(
                         history_tx.clone(),
                         stream.clone(),
@@ -271,7 +272,8 @@ pub async fn match_seq_num_client(
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let resp = match random_op() {
             Op::Append => {
-                let GeneratedBatch{batch, last_xxh3} = generate_records(AntithesisRng.gen_range(1..1000))?;
+                let GeneratedBatch { batch, last_xxh3 } =
+                    generate_records(AntithesisRng.gen_range(1..1000))?;
                 let fin = append(
                     history_tx.clone(),
                     stream.clone(),
@@ -334,7 +336,8 @@ pub async fn client(
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match random_op() {
             Op::Append => {
-                let GeneratedBatch{batch, last_xxh3} = generate_records(AntithesisRng.gen_range(1..1000))?;
+                let GeneratedBatch { batch, last_xxh3 } =
+                    generate_records(AntithesisRng.gen_range(1..1000))?;
                 let fin = append(
                     history_tx.clone(),
                     stream.clone(),
@@ -530,16 +533,10 @@ async fn append(
             // Server errors - check the code for definite vs indefinite
             S2Error::Server(err) => {
                 // Re: table on side-effect possibilities at <https://s2.dev/docs/api/error-codes>
-                let side_effecty = [
-                    "request_timeout",
-                    "other",
-                    "storage",
-                    "upstream_timeout"
-                ];
+                let side_effecty = ["request_timeout", "other", "storage", "upstream_timeout"];
                 if side_effecty.iter().any(|c| err.code == *c) {
                     CallFinish::AppendIndefiniteFailure
-                }
-                 else {
+                } else {
                     CallFinish::AppendDefiniteFailure
                 }
             }
