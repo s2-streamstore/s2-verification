@@ -14,9 +14,10 @@ use s2_verification::history::{
     match_seq_num_client,
 };
 use std::env;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, info};
 use tracing_subscriber::layer::SubscriberExt;
@@ -69,7 +70,7 @@ async fn main() -> eyre::Result<()> {
 
     let custom_endpoints = S2Endpoints::from_env().ok();
     let mut config = S2Config::new(env::var("S2_ACCESS_TOKEN")?)
-        .with_retry(RetryConfig::new().with_append_retry_policy(AppendRetryPolicy::NoSideEffects));
+        .with_retry(RetryConfig::new().with_max_attempts(NonZeroU32::new(10).expect("non-zero")).with_min_base_delay(Duration::from_millis(1000)).with_append_retry_policy(AppendRetryPolicy::NoSideEffects));
 
     if let Some(endpoints) = custom_endpoints {
         config = config.with_endpoints(endpoints);
