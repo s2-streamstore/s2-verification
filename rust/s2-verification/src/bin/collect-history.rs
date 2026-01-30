@@ -69,21 +69,21 @@ async fn main() -> eyre::Result<()> {
     let stream: StreamName = stream.parse()?;
 
     let custom_endpoints = S2Endpoints::from_env().ok();
-    let mut config = S2Config::new(env::var("S2_ACCESS_TOKEN")?).with_retry(
+    let mut setup_config = S2Config::new(env::var("S2_ACCESS_TOKEN")?).with_retry(
         RetryConfig::new()
             .with_max_attempts(NonZeroU32::new(1024).expect("non-zero"))
             .with_min_base_delay(Duration::from_millis(1000)),
     );
 
     if let Some(endpoints) = custom_endpoints {
-        config = config.with_endpoints(endpoints);
+        setup_config = setup_config.with_endpoints(endpoints);
     }
 
-    let test_config = config.clone().with_retry(
+    let test_config = setup_config.clone().with_retry(
         RetryConfig::default().with_append_retry_policy(AppendRetryPolicy::NoSideEffects),
     );
 
-    let s2 = S2::new(config)?;
+    let s2 = S2::new(setup_config)?;
     let basin_client = s2.basin(basin.clone());
     let _stream_exists = match basin_client
         .create_stream(CreateStreamInput::new(stream.clone()))
