@@ -69,14 +69,21 @@ async fn main() -> eyre::Result<()> {
     let stream: StreamName = stream.parse()?;
 
     let custom_endpoints = S2Endpoints::from_env().ok();
-    let mut config = S2Config::new(env::var("S2_ACCESS_TOKEN")?)
-        .with_retry(RetryConfig::new().with_max_attempts(NonZeroU32::new(10).expect("non-zero")).with_min_base_delay(Duration::from_millis(1000)).with_append_retry_policy(AppendRetryPolicy::NoSideEffects));
+    let mut config = S2Config::new(env::var("S2_ACCESS_TOKEN")?).with_retry(
+        RetryConfig::new()
+            .with_max_attempts(NonZeroU32::new(1024).expect("non-zero"))
+            .with_min_base_delay(Duration::from_millis(1000)),
+    );
 
     if let Some(endpoints) = custom_endpoints {
         config = config.with_endpoints(endpoints);
     }
 
-    let s2 = S2::new(config.clone())?;
+    let test_config = config.clone().with_retry(
+        RetryConfig::default().with_append_retry_policy(AppendRetryPolicy::NoSideEffects),
+    );
+
+    let s2 = S2::new(config)?;
     let basin_client = s2.basin(basin.clone());
     let _stream_exists = match basin_client
         .create_stream(CreateStreamInput::new(stream.clone()))
@@ -91,7 +98,6 @@ async fn main() -> eyre::Result<()> {
     let client_ids = Arc::new(AtomicU64::new(1));
     let op_ids = Arc::new(AtomicU64::new(0));
 
-    let s2 = S2::new(config.clone())?;
     let stream_client = s2.basin(basin.clone()).stream(stream.clone());
     let _resp = stream_client.check_tail().await?;
     let batch = stream_client
@@ -162,7 +168,7 @@ async fn main() -> eyre::Result<()> {
     debug!("starting concurrent clients");
     let futs = FuturesUnordered::new();
     for _client_id in 0..num_concurrent_clients {
-        let s2 = S2::new(config.clone())?;
+        let s2 = S2::new(test_config.clone())?;
         let stream_client = s2.basin(basin.clone()).stream(stream.clone());
 
         let fut: std::pin::Pin<
