@@ -534,10 +534,11 @@ async fn append(
             S2Error::Server(err) => {
                 match err.code.as_str() {
                     // Re: table on side-effect possibilities at <https://s2.dev/docs/api/error-codes>
-                    "request_timeout" | "other" | "storage" | "upstream_timeout" => {
+                    "rate_limited" | "hot_server"
+                     => CallFinish::AppendDefiniteFailure,
+                    _ => {
                         CallFinish::AppendIndefiniteFailure
                     }
-                    _ => CallFinish::AppendDefiniteFailure,
                 }
             }
             // Client errors and other errors are indefinite (might succeed on retry)
