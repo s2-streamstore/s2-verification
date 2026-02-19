@@ -3,8 +3,9 @@ use rand::Rng;
 use s2_sdk::{
     S2Stream,
     types::{
-        AppendInput, AppendRecord, AppendRecordBatch, CommandRecord, FencingToken, MeteredBytes,
-        ReadBatch, ReadFrom, ReadInput, ReadLimits, ReadStart, ReadStop, S2Error, Streaming,
+        AppendConditionFailed, AppendInput, AppendRecord, AppendRecordBatch, CommandRecord,
+        FencingToken, MeteredBytes, ReadBatch, ReadFrom, ReadInput, ReadLimits, ReadStart,
+        ReadStop, S2Error, Streaming,
     },
 };
 use serde::Serialize;
@@ -482,6 +483,55 @@ async fn check_tail(
     })
 }
 
+/// When an append with `match_seq_num` receives `AppendConditionFailed::SeqNumMismatch`,
+/// read back from the stream to determine if the original append actually succeeded
+/// (e.g. due to a retry after a connection break).
+async fn reverify_append(
+    stream: &S2Stream,
+    records: &AppendRecordBatch,
+    match_seq_num: u64,
+) -> CallFinish {
+    let input = ReadInput::new()
+        .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(match_seq_num)))
+        .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(records.len())));
+
+    let batch = match stream.read(input).await {
+        Ok(batch) => batch,
+        Err(e) => {
+            debug!(
+                ?e,
+                match_seq_num, "reverify read failed, treating as indefinite"
+            );
+            return CallFinish::AppendIndefiniteFailure;
+        }
+    };
+
+    debug!(
+        match_seq_num,
+        read_count = batch.records.len(),
+        expected_count = records.len(),
+        "reverifying append via read-back"
+    );
+
+    if batch.records.len() != records.len() {
+        return CallFinish::AppendDefiniteFailure;
+    }
+
+    for (appended, read_back) in records.iter().zip(batch.records.iter()) {
+        if appended.body() != &*read_back.body || appended.headers() != &read_back.headers[..] {
+            return CallFinish::AppendDefiniteFailure;
+        }
+    }
+
+    // Records match — the original append did succeed.
+    let tail = batch
+        .records
+        .last()
+        .map(|r| r.seq_num + 1)
+        .unwrap_or(match_seq_num);
+    CallFinish::AppendSuccess { tail }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(level = Level::TRACE, skip(history_tx, stream, records))]
 async fn append(
@@ -512,6 +562,10 @@ async fn append(
         op_id,
     })?;
 
+    // When match_seq_num is set, keep a clone for potential reverification
+    // in case we get AppendConditionFailed::SeqNumMismatch.
+    let records_for_reverify = match_seq_num.map(|_| records.clone());
+
     let mut input = AppendInput::new(records);
     if let Some(match_seq_num) = match_seq_num {
         input = input.with_match_seq_num(match_seq_num);
@@ -528,7 +582,19 @@ async fn append(
         Err(e) => match &e {
             // Validation errors are definite failures
             S2Error::Validation(_) => CallFinish::AppendDefiniteFailure,
-            // Append condition failures (fencing token mismatch, seq num mismatch) are definite
+            // SeqNumMismatch with match_seq_num: reverify via read-back to determine
+            // if the original append actually succeeded (e.g. after a retry on connection break).
+            S2Error::AppendConditionFailed(AppendConditionFailed::SeqNumMismatch(_))
+                if match_seq_num.is_some() =>
+            {
+                reverify_append(
+                    &stream,
+                    records_for_reverify.as_ref().expect("should not be None"),
+                    match_seq_num.expect("should not be None"),
+                )
+                .await
+            }
+            // Other append condition failures (e.g. fencing token mismatch) are definite
             S2Error::AppendConditionFailed(_) => CallFinish::AppendDefiniteFailure,
             // Server errors - check the code for definite vs indefinite
             S2Error::Server(err) => {
