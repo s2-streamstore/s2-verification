@@ -1535,9 +1535,9 @@ dependencies = [
 
 [[package]]
 name = "s2-sdk"
-version = "0.24.2"
+version = "0.24.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f9ffd116f3fded92145339adbf3acc82b7bb82f23da2dd096356dd5560d30ce"
+checksum = "fad8b24ded19d35d022ef73f7c98e3b5a2b75062271b445ab95c79cf12b332e1"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -1545,10 +1545,12 @@ dependencies = [
  "bytes",
  "futures",
  "http",
+ "http-body",
  "http-body-util",
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "pin-project-lite",
  "prost",
  "rand 0.10.0",
  "rustls",
