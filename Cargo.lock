@@ -1559,9 +1559,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.12"
+version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8279bb85272c9f10811ae6a6c547ff594d6a7f3c6c6b02ee9726d1d0dcfcdd06"
+checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -1583,9 +1583,9 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s2-api"
-version = "0.28.0"
+version = "0.28.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01b902b8ff536ba9fdb86614355493a76ea6bc48e1fa263504e334ca7886752b"
+checksum = "e4d8f48bfbd2fdcb70e3311a6464cbee95be3e3da714667c3d68d84316bd83ce"
 dependencies = [
  "base64ct",
  "bytes",
@@ -1610,9 +1610,9 @@ dependencies = [
 
 [[package]]
 name = "s2-common"
-version = "0.32.0"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "954c00c0348e18afe283f2e571bcd219d887181f9c846a929ae257e5c20c913d"
+checksum = "89e60f1a6c2385bc387222e3a0514eebae7d4689e33a290305239eef2ef0ad33"
 dependencies = [
  "aegis",
  "aes-gcm",
@@ -1633,9 +1633,9 @@ dependencies = [
 
 [[package]]
 name = "s2-sdk"
-version = "0.27.0"
+version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c8914af2dd0575aee46bdf50a0a2c38b1de0e1dac6035ed9e254f9b9031bef5"
+checksum = "fde2b73877ac0c197585a20c4b5d729cbff32c19327e9642e47dffaedf788a51"
 dependencies = [
  "async-compression",
  "async-stream",
