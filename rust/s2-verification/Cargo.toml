@@ -14,6 +14,8 @@ serde = { version = "1.0.228", features = ["derive"] }
 tokio-stream = "0.1.18"
 futures = "0.3.32"
 serde_json = "1.0.149"
-antithesis_sdk = { git = "https://github.com/antithesishq/antithesis-sdk-rust", rev = "6829a946e7e970cc743ffe17c3cee7d2bc25425a", default-features = false, features = ["full", "rand_v0_10"] }
-rand = "0.10"
+antithesis_sdk = "0.2.8"
+# required for antithesis_sdk rand compatibility
+# needs to be 0.8 till it upgrades
+rand = "0.8"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
