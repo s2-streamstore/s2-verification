@@ -1,5 +1,5 @@
 use antithesis_sdk::random::AntithesisRng;
-use rand::Rng;
+use rand::RngExt;
 use s2_sdk::{
     S2Stream,
     types::{
@@ -47,7 +47,7 @@ pub fn generate_records(num_records: usize) -> eyre::Result<GeneratedBatch> {
     while records.len() < num_records && batch_bytes + PER_RECORD_OVERHEAD < MAX_BATCH_BYTES {
         let record_body_budget = MAX_BATCH_BYTES - batch_bytes - PER_RECORD_OVERHEAD;
 
-        let size = rng.gen_range(1..=record_body_budget);
+        let size = rng.random_range(1..=record_body_budget);
         let mut body = vec![0u8; size];
         rng.fill(&mut body[..]);
 
@@ -110,7 +110,7 @@ pub struct LabeledEvent {
 }
 
 fn random_op() -> Op {
-    match AntithesisRng.gen_range(0..3) {
+    match AntithesisRng.random_range(0..3) {
         0 => Op::Append,
         1 => Op::Read,
         2 => Op::CheckTail,
@@ -206,7 +206,7 @@ pub async fn fencing_token_client(
             let resp = match random_op() {
                 Op::Append => {
                     let GeneratedBatch { batch, last_xxh3 } =
-                        generate_records(AntithesisRng.gen_range(1..1000))?;
+                        generate_records(AntithesisRng.random_range(1..1000))?;
                     let fin = append(
                         history_tx.clone(),
                         stream.clone(),
@@ -273,7 +273,7 @@ pub async fn match_seq_num_client(
         let resp = match random_op() {
             Op::Append => {
                 let GeneratedBatch { batch, last_xxh3 } =
-                    generate_records(AntithesisRng.gen_range(1..1000))?;
+                    generate_records(AntithesisRng.random_range(1..1000))?;
                 let fin = append(
                     history_tx.clone(),
                     stream.clone(),
@@ -337,7 +337,7 @@ pub async fn client(
         match random_op() {
             Op::Append => {
                 let GeneratedBatch { batch, last_xxh3 } =
-                    generate_records(AntithesisRng.gen_range(1..1000))?;
+                    generate_records(AntithesisRng.random_range(1..1000))?;
                 let fin = append(
                     history_tx.clone(),
                     stream.clone(),
