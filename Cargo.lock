@@ -532,26 +532,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
-name = "enum-ordinalize"
-version = "4.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a1091a7bb1f8f2c4b28f1fe2cef4980ca2d410a3d727d67ecc3178c9b0800f0"
-dependencies = [
- "enum-ordinalize-derive",
-]
-
-[[package]]
-name = "enum-ordinalize-derive"
-version = "4.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ca9601fb2d62598ee17836250842873a413586e5d7ed88b356e38ddbb0ec631"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "enumset"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -585,7 +565,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1583,14 +1563,13 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s2-api"
-version = "0.28.1"
+version = "0.28.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4d8f48bfbd2fdcb70e3311a6464cbee95be3e3da714667c3d68d84316bd83ce"
+checksum = "7fdc90a061e5f429bb63ae009ddf68eb1db4c6b768cddfdedc5c052776711d5e"
 dependencies = [
  "base64ct",
  "bytes",
  "compact_str",
- "enum-ordinalize",
  "enumset",
  "flate2",
  "futures",
@@ -1610,9 +1589,9 @@ dependencies = [
 
 [[package]]
 name = "s2-common"
-version = "0.33.0"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89e60f1a6c2385bc387222e3a0514eebae7d4689e33a290305239eef2ef0ad33"
+checksum = "3224106a2804fbb80d1c092929f449681fb450ddc93e5eeaa8236222f2bf232b"
 dependencies = [
  "aegis",
  "aes-gcm",
@@ -1620,7 +1599,6 @@ dependencies = [
  "blake3",
  "bytes",
  "compact_str",
- "enum-ordinalize",
  "enumset",
  "http",
  "rand 0.10.1",
@@ -1633,9 +1611,9 @@ dependencies = [
 
 [[package]]
 name = "s2-sdk"
-version = "0.27.1"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fde2b73877ac0c197585a20c4b5d729cbff32c19327e9642e47dffaedf788a51"
+checksum = "740c6779e7fb113f9a1ca539eae8c74bae9ee12a8df093e5bda678f6e2336f10"
 dependencies = [
  "async-compression",
  "async-stream",
