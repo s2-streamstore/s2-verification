@@ -210,6 +210,13 @@ type StreamOutput struct {
 	Xxh3            *uint64
 }
 
+func stringPtrEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
 var s2Model = porcupine.NondeterministicModel{
 	Init: func() []interface{} {
 		states := []interface{}{
@@ -244,10 +251,12 @@ var s2Model = porcupine.NondeterministicModel{
 				// Did not become durable.
 				return []interface{}{startingState}
 			} else if out.Failure {
-				if inp.BatchFencingToken != nil && startingState.FencingToken != nil && *inp.BatchFencingToken != *startingState.FencingToken {
-					// A fencing token was supplied, but did not match the current token on the stream.
-					// This should not have become durable.
-					return []interface{}{startingState}
+				if inp.BatchFencingToken != nil {
+					if startingState.FencingToken == nil || *inp.BatchFencingToken != *startingState.FencingToken {
+						// A fencing token was supplied, but did not match the current token on the stream.
+						// This should not have become durable.
+						return []interface{}{startingState}
+					}
 				}
 				if inp.MatchSeqNum != nil && *inp.MatchSeqNum != startingState.Tail {
 					// A matchSeqNum position was supplied, but did not match the current tail of the stream.
@@ -294,7 +303,7 @@ var s2Model = porcupine.NondeterministicModel{
 	Equal: func(state1, state2 interface{}) bool {
 		st1 := state1.(StreamState)
 		st2 := state2.(StreamState)
-		return st1.Tail == st2.Tail && st1.Xxh3 == st2.Xxh3 && st1.FencingToken == st2.FencingToken
+		return st1.Tail == st2.Tail && st1.Xxh3 == st2.Xxh3 && stringPtrEqual(st1.FencingToken, st2.FencingToken)
 	},
 	DescribeOperation: func(input interface{}, output interface{}) string {
 		inp := input.(StreamInput)

@@ -136,7 +136,7 @@ s2-porcupine \
 Start `s2-lite` in a Docker container:
 
 ```bash
-docker run -p 8080:80 ghcr.io/s2-streamstore/s2-lite
+docker run -p 8080:80 ghcr.io/s2-streamstore/s2 lite
 ```
 
 Create a new basin, gather history, and check it against the model:

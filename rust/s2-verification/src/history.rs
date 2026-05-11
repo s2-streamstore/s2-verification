@@ -384,11 +384,10 @@ async fn resolve_read_tail(mut stream: Streaming<ReadBatch>) -> eyre::Result<Cal
                 if let Some(tail_pos) = batch.tail
                     && batch.records.is_empty()
                 {
-                    // No records but we have tail - stream is caught up
-                    return Ok(CallFinish::ReadSuccess {
-                        tail: tail_pos.seq_num,
-                        xxh3,
-                    });
+                    panic!(
+                        "read_session yielded a tail-only empty batch: tail={}",
+                        tail_pos.seq_num
+                    );
                 }
                 if let Some(last) = batch.records.last() {
                     xxh3 = xxh3_64(last.body.as_ref());
@@ -534,7 +533,9 @@ async fn append(
             S2Error::Server(err) => {
                 match err.code.as_str() {
                     // Re: table on side-effect possibilities at <https://s2.dev/docs/api/error-codes>
-                    "rate_limited" | "hot_server" => CallFinish::AppendDefiniteFailure,
+                    "rate_limited" | "hot_server" | "transaction_conflict" => {
+                        CallFinish::AppendDefiniteFailure
+                    }
                     _ => CallFinish::AppendIndefiniteFailure,
                 }
             }
