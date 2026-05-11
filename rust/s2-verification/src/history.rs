@@ -534,7 +534,9 @@ async fn append(
             S2Error::Server(err) => {
                 match err.code.as_str() {
                     // Re: table on side-effect possibilities at <https://s2.dev/docs/api/error-codes>
-                    "rate_limited" | "hot_server" => CallFinish::AppendDefiniteFailure,
+                    "rate_limited" | "hot_server" | "transaction_conflict" => {
+                        CallFinish::AppendDefiniteFailure
+                    }
                     _ => CallFinish::AppendIndefiniteFailure,
                 }
             }
