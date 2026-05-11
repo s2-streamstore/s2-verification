@@ -210,6 +210,13 @@ type StreamOutput struct {
 	Xxh3            *uint64
 }
 
+func stringPtrEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
 var s2Model = porcupine.NondeterministicModel{
 	Init: func() []interface{} {
 		states := []interface{}{
@@ -294,7 +301,7 @@ var s2Model = porcupine.NondeterministicModel{
 	Equal: func(state1, state2 interface{}) bool {
 		st1 := state1.(StreamState)
 		st2 := state2.(StreamState)
-		return st1.Tail == st2.Tail && st1.Xxh3 == st2.Xxh3 && st1.FencingToken == st2.FencingToken
+		return st1.Tail == st2.Tail && st1.Xxh3 == st2.Xxh3 && stringPtrEqual(st1.FencingToken, st2.FencingToken)
 	},
 	DescribeOperation: func(input interface{}, output interface{}) string {
 		inp := input.(StreamInput)
