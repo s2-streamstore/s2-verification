@@ -251,10 +251,12 @@ var s2Model = porcupine.NondeterministicModel{
 				// Did not become durable.
 				return []interface{}{startingState}
 			} else if out.Failure {
-				if inp.BatchFencingToken != nil && startingState.FencingToken != nil && *inp.BatchFencingToken != *startingState.FencingToken {
-					// A fencing token was supplied, but did not match the current token on the stream.
-					// This should not have become durable.
-					return []interface{}{startingState}
+				if inp.BatchFencingToken != nil {
+					if startingState.FencingToken == nil || *inp.BatchFencingToken != *startingState.FencingToken {
+						// A fencing token was supplied, but did not match the current token on the stream.
+						// This should not have become durable.
+						return []interface{}{startingState}
+					}
 				}
 				if inp.MatchSeqNum != nil && *inp.MatchSeqNum != startingState.Tail {
 					// A matchSeqNum position was supplied, but did not match the current tail of the stream.
