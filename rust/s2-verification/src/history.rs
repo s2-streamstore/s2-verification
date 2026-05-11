@@ -384,11 +384,10 @@ async fn resolve_read_tail(mut stream: Streaming<ReadBatch>) -> eyre::Result<Cal
                 if let Some(tail_pos) = batch.tail
                     && batch.records.is_empty()
                 {
-                    // No records but we have tail - stream is caught up
-                    return Ok(CallFinish::ReadSuccess {
-                        tail: tail_pos.seq_num,
-                        xxh3,
-                    });
+                    panic!(
+                        "read_session yielded a tail-only empty batch: tail={}",
+                        tail_pos.seq_num
+                    );
                 }
                 if let Some(last) = batch.records.last() {
                     xxh3 = xxh3_64(last.body.as_ref());
