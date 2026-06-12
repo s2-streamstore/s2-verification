@@ -17,7 +17,7 @@ hash(stream + record) = xxh3_64_with_seed(le_bytes(xxh3_64(record.body)), seed =
 
 - The state is `(tail, cumulative hash, fencing token)`.
 - Each append's start event logs the xxh3 of every record body in the batch (`record_hashes`), so the checker can fold them onto whichever candidate state it is exploring. (The fold cannot be precomputed by the collector, since the prior state is only known inside the checker.)
-- Each read starts from the head of the stream (seq_num 0), folds the same chain over every record body it observes, and reports `(tail, cumulative hash)`, which the model compares against its state exactly.
+- Each read starts from the head of the stream (seq_num 0), folds the same chain over every record body it observes, and reports `(tail, stream_hash)`, which the model compares against its state exactly.
 
 A read therefore validates the full stream prefix, not just the most recent record: a lost, reordered, or corrupted record anywhere in the stream produces a different chained hash, and the history will fail linearizability checking. The trade-off is that each read op scans the whole stream, so reads get heavier as the stream grows — prefer starting from an empty stream for long collection runs.
 

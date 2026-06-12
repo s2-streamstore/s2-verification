@@ -107,6 +107,24 @@ func TestEventsFromReaderRejectsMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestEventsFromReaderDecodesReadSuccessStreamHash(t *testing.T) {
+	input := strings.NewReader(`{"event":{"Finish":{"ReadSuccess":{"tail":7,"stream_hash":42}}},"client_id":1,"op_id":2}`)
+	events, err := eventsFromReader(input)
+	if err != nil {
+		t.Fatalf("eventsFromReader: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	output, ok := events[0].Value.(StreamOutput)
+	if !ok {
+		t.Fatalf("expected StreamOutput, got %T", events[0].Value)
+	}
+	if output.StreamHash == nil || *output.StreamHash != 42 {
+		t.Fatalf("expected stream hash 42, got %v", output.StreamHash)
+	}
+}
+
 func TestBasicNoConcurrency(t *testing.T) {
 	batch := []uint64{11, 22, 33, 44}
 	h := foldRecordHashes(0, batch, nil)

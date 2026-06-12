@@ -112,7 +112,7 @@ pub enum CallFinish {
         tail: u64,
         /// Cumulative [`chain_hash`] over every record body observed from the
         /// head of the stream (seq_num 0) through the tail.
-        xxh3: u64,
+        stream_hash: u64,
     },
 }
 
@@ -433,10 +433,7 @@ async fn resolve_read_tail(mut stream: Streaming<ReadBatch>) -> eyre::Result<Cal
             }
         }
     }
-    Ok(CallFinish::ReadSuccess {
-        tail,
-        xxh3: stream_hash,
-    })
+    Ok(CallFinish::ReadSuccess { tail, stream_hash })
 }
 
 #[tracing::instrument(level = Level::TRACE, skip(history_tx, stream))]
@@ -472,7 +469,10 @@ async fn read_session(
         // that is still an authoritative observation of an empty stream.
         Err(S2Error::ReadUnwritten(pos)) if pos.seq_num == 0 => {
             trace!("read_session on empty stream");
-            CallFinish::ReadSuccess { tail: 0, xxh3: 0 }
+            CallFinish::ReadSuccess {
+                tail: 0,
+                stream_hash: 0,
+            }
         }
         Err(_e) => {
             trace!("read_session error");
@@ -693,5 +693,15 @@ mod tests {
         assert_eq!(h1, 0x4d2b003ee417c3a5);
         assert_eq!(h2, 0x132e5d5dd7936edd);
         assert_eq!(h3, 0x732ee99abc5002ff);
+    }
+
+    #[test]
+    fn read_success_serializes_stream_hash() {
+        let json = serde_json::to_string(&CallFinish::ReadSuccess {
+            tail: 7,
+            stream_hash: 42,
+        })
+        .expect("serialize read success");
+        assert_eq!(json, r#"{"ReadSuccess":{"tail":7,"stream_hash":42}}"#);
     }
 }

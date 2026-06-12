@@ -74,8 +74,8 @@ type AppendSuccessResult struct {
 }
 
 type ReadSuccessResult struct {
-	Tail int    `json:"tail"`
-	Xxh3 uint64 `json:"xxh3"`
+	Tail       int    `json:"tail"`
+	StreamHash uint64 `json:"stream_hash"`
 }
 
 type CheckTailSuccessResult struct {
@@ -508,7 +508,7 @@ func outputFromFinish(fe *FinishEvent) StreamOutput {
 			Failure:         false,
 			DefiniteFailure: false,
 			Tail:            Ptr(uint32(fe.ReadSuccess.Tail)),
-			StreamHash:      Ptr(fe.ReadSuccess.Xxh3),
+			StreamHash:      Ptr(fe.ReadSuccess.StreamHash),
 		}
 	case fe.ReadFailure:
 		return StreamOutput{
