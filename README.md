@@ -6,6 +6,23 @@ We use this internally as a part of our custom [turmoil](https://github.com/toki
 
 A concurrent history can also be collected against the prod S2 service (or self-hosted [s2-lite](https://github.com/s2-streamstore/s2)), and evaluated with Porcupine.
 
+## Model state
+
+The model verifies the entire contents of the stream, while keeping its state constant-size. Rather than storing the stream itself (which would grow without bound on long histories with large record batches), the state holds a cumulative hash which commits to every record from the head of the stream through the tail:
+
+```
+hash(empty stream) = 0
+hash(stream + record) = xxh3_64_with_seed(le_bytes(xxh3_64(record.body)), seed = hash(stream))
+```
+
+- The state is `(tail, cumulative hash, fencing token)`.
+- Each append's start event logs the xxh3 of every record body in the batch (`record_hashes`), so the checker can fold them onto whichever candidate state it is exploring. (The fold cannot be precomputed by the collector, since the prior state is only known inside the checker.)
+- Each read starts from the head of the stream (seq_num 0), folds the same chain over every record body it observes, and reports `(tail, cumulative hash)`, which the model compares against its state exactly.
+
+A read therefore validates the full stream prefix, not just the most recent record: a lost, reordered, or corrupted record anywhere in the stream produces a different chained hash, and the history will fail linearizability checking. The trade-off is that each read op scans the whole stream, so reads get heavier as the stream grows — prefer starting from an empty stream for long collection runs.
+
+The Rust collector (`chain_hash`) and the Go model (`chainHash`) must compute this identically; shared test vectors in both codebases pin the scheme.
+
 ## Installing
 
 You will need active installations of Rust and Golang. (Also `make`.)
@@ -37,7 +54,7 @@ Feel free to use an existing basin if that is easier.
 
 Run the `collect-history` binary. This will make a new stream with the provided name if one does not already exist.
 
-Note that the Porcupine model assumes that the `tail` of the stream is 0 at start. The `collect-history` bin will check the current tail, before starting the concurrent clients; if it is not 0, it will synthesize (necessarily successful) append logs which represent a move from 0 -> the actual current tail, and these will be the first two entries in the resulting log. Actual concurrent client logs will begin after that.
+Note that the Porcupine model assumes that the `tail` of the stream is 0 at start. The `collect-history` bin will read the stream from the head, before starting the concurrent clients; if the tail is not 0, it will synthesize (necessarily successful) append logs which represent a move from 0 -> the actual current tail, carrying the hash of every existing record, and these will be the first two entries in the resulting log. Actual concurrent client logs will begin after that.
 
 ```bash
 export RUST_LOG=info
@@ -53,6 +70,7 @@ cargo run --release -- \
 A few things to keep in mind:
 - All requests within a client are made sequentially, and there are no sleeps. A client will move on to a subsequent request as soon as it receives a response from a prior one.
 - Each client will randomly choose between an append, read, and check-tail operation.
+- Read operations scan the entire stream from the head (to compute the cumulative hash), so they become more expensive as the stream grows.
 - It is hard to predict how hard of a time Porcupine will have assembling a linear history. In general, the more clients, the harder it is to construct a history in a reasonable amount of time.
 
 There are three types of client behaviors that can be selected from, using the `workflow` argument in the CLI.
@@ -90,6 +108,7 @@ The start of an append, for a batch containing 5 records, which specifies a `mat
     "Start": {
       "Append": {
         "num_records": 5,
+        "record_hashes": [11078887432134085092, 6584568434689709502, 11945142319179441590, 15147371070200272846, 476331059009755526],
         "set_fencing_token": null,
         "fencing_token": null,
         "match_seq_num": 2733
