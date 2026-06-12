@@ -127,7 +127,7 @@ func TestEventsFromReaderDecodesReadSuccessStreamHash(t *testing.T) {
 
 func TestBasicNoConcurrency(t *testing.T) {
 	batch := []uint64{11, 22, 33, 44}
-	h := foldRecordHashes(0, batch, nil)
+	h := foldRecordHashes(0, batch)
 
 	events := []porcupine.Event{
 		// Append (num_records=4)
@@ -154,7 +154,7 @@ func TestBasicNoConcurrency(t *testing.T) {
 func TestBasicNoConcurrencyDefiniteFailure1(t *testing.T) {
 	batch1 := []uint64{11, 22, 33, 44}
 	batch2 := []uint64{55, 66, 77, 88, 99}
-	h1 := foldRecordHashes(0, batch1, nil)
+	h1 := foldRecordHashes(0, batch1)
 
 	events := []porcupine.Event{
 		// Append (num_records=4)
@@ -192,8 +192,8 @@ func TestBasicNoConcurrencyDefiniteFailure1(t *testing.T) {
 func TestBasicNoConcurrencyDefiniteFailure2(t *testing.T) {
 	batch1 := []uint64{11, 22, 33, 44}
 	batch2 := []uint64{55, 66, 77, 88, 99}
-	h1 := foldRecordHashes(0, batch1, nil)
-	h2 := foldRecordHashes(h1, batch2, nil)
+	h1 := foldRecordHashes(0, batch1)
+	h2 := foldRecordHashes(h1, batch2)
 
 	events := []porcupine.Event{
 		// Append (num_records=4)
@@ -233,8 +233,8 @@ func TestBasicNoConcurrencyDefiniteFailure2(t *testing.T) {
 func TestBasicNoConcurrencyIndefiniteFailure1(t *testing.T) {
 	batch1 := []uint64{11, 22, 33, 44}
 	batch2 := []uint64{55, 66, 77, 88, 99}
-	h1 := foldRecordHashes(0, batch1, nil)
-	h2 := foldRecordHashes(h1, batch2, nil)
+	h1 := foldRecordHashes(0, batch1)
+	h2 := foldRecordHashes(h1, batch2)
 
 	events := []porcupine.Event{
 		// Append (num_records=4)
@@ -273,7 +273,7 @@ func TestBasicNoConcurrencyIndefiniteFailure1(t *testing.T) {
 func TestBasicNoConcurrencyIndefiniteFailure2(t *testing.T) {
 	batch1 := []uint64{11, 22, 33, 44}
 	batch2 := []uint64{55, 66, 77, 88, 99}
-	h1 := foldRecordHashes(0, batch1, nil)
+	h1 := foldRecordHashes(0, batch1)
 
 	events := []porcupine.Event{
 		// Append (num_records=4)
@@ -318,7 +318,7 @@ func TestReadDetectsCorruptedPrefix(t *testing.T) {
 	batch1 := []uint64{11, 22}
 	batch2 := []uint64{33}
 	corrupted := []uint64{98, 99} // a different first batch...
-	hCorrupt := foldRecordHashes(foldRecordHashes(0, corrupted, nil), batch2, nil)
+	hCorrupt := foldRecordHashes(foldRecordHashes(0, corrupted), batch2)
 
 	events := []porcupine.Event{
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint32(2)), RecordHashes: batch1}, Id: 0, ClientId: 0},
@@ -346,7 +346,7 @@ func TestReadDetectsCorruptedPrefix(t *testing.T) {
 func TestReadVerifiesWholeStream(t *testing.T) {
 	batch1 := []uint64{11, 22}
 	batch2 := []uint64{33}
-	h := foldRecordHashes(foldRecordHashes(0, batch1, nil), batch2, nil)
+	h := foldRecordHashes(foldRecordHashes(0, batch1), batch2)
 
 	events := []porcupine.Event{
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint32(2)), RecordHashes: batch1}, Id: 0, ClientId: 0},

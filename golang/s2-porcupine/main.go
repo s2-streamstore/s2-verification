@@ -212,10 +212,6 @@ type StreamInput struct {
 	NumRecords        *uint32
 	// xxh3 of each record body in the batch, in order.
 	RecordHashes []uint64
-	// Memoizes foldRecordHashes by prior stream hash, since the checker may
-	// step the same input from the same state many times. Safe as long as the
-	// model is checked as a single partition (one checker goroutine).
-	foldMemo map[uint64]uint64
 }
 
 type StreamOutput struct {
@@ -239,18 +235,10 @@ func chainHash(streamHash uint64, recordHash uint64) uint64 {
 	return xxh3.HashSeed(buf[:], streamHash)
 }
 
-func foldRecordHashes(streamHash uint64, recordHashes []uint64, memo map[uint64]uint64) uint64 {
-	if memo != nil {
-		if v, ok := memo[streamHash]; ok {
-			return v
-		}
-	}
+func foldRecordHashes(streamHash uint64, recordHashes []uint64) uint64 {
 	acc := streamHash
 	for _, rh := range recordHashes {
 		acc = chainHash(acc, rh)
-	}
-	if memo != nil {
-		memo[streamHash] = acc
 	}
 	return acc
 }
@@ -289,7 +277,7 @@ var s2Model = porcupine.NondeterministicModel{
 			}
 			optimisticState := StreamState{
 				Tail:         startingState.Tail + *inp.NumRecords,
-				StreamHash:   foldRecordHashes(startingState.StreamHash, inp.RecordHashes, inp.foldMemo),
+				StreamHash:   foldRecordHashes(startingState.StreamHash, inp.RecordHashes),
 				FencingToken: optimisticToken,
 			}
 			if out.Failure && out.DefiniteFailure {
@@ -444,7 +432,6 @@ func inputFromStart(se *StartEvent) StreamInput {
 	var batchFencingToken *string
 	var matchSeqNum *uint32
 	var recordHashes []uint64
-	var foldMemo map[uint64]uint64
 
 	switch {
 	case se.Append != nil:
@@ -452,7 +439,6 @@ func inputFromStart(se *StartEvent) StreamInput {
 		num := uint32(se.Append.NumRecords)
 		numRecords = &num
 		recordHashes = se.Append.RecordHashes
-		foldMemo = make(map[uint64]uint64)
 		setFencingToken = se.Append.SetFencingToken
 		batchFencingToken = se.Append.FencingToken
 		if se.Append.MatchSeqNum != nil {
@@ -474,7 +460,6 @@ func inputFromStart(se *StartEvent) StreamInput {
 		MatchSeqNum:       matchSeqNum,
 		NumRecords:        numRecords,
 		RecordHashes:      recordHashes,
-		foldMemo:          foldMemo,
 	}
 }
 
