@@ -1,24 +1,26 @@
 package main
 
 import (
-	"bufio"
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/anishathalye/porcupine"
+	"github.com/zeebo/xxh3"
 )
 
 type AppendArgs struct {
-	NumRecords      int     `json:"num_records"`
-	LastRecordXxh3  uint64  `json:"last_record_xxh3"`
-	SetFencingToken *string `json:"set_fencing_token"`
-	FencingToken    *string `json:"fencing_token"`
-	MatchSeqNum     *int    `json:"match_seq_num"`
+	NumRecords      int      `json:"num_records"`
+	RecordHashes    []uint64 `json:"record_hashes"`
+	SetFencingToken *string  `json:"set_fencing_token"`
+	FencingToken    *string  `json:"fencing_token"`
+	MatchSeqNum     *int     `json:"match_seq_num"`
 }
 
 type StartEvent struct {
@@ -54,6 +56,12 @@ func (se *StartEvent) UnmarshalJSON(data []byte) error {
 		if err := json.Unmarshal(appendData, &args); err != nil {
 			return fmt.Errorf("parsing Append args: %w", err)
 		}
+		// One hash per record is required to fold the batch onto the model's
+		// cumulative stream hash. A mismatch usually means the history was
+		// collected with an older, incompatible collector.
+		if len(args.RecordHashes) != args.NumRecords {
+			return fmt.Errorf("append has %d record_hashes but %d records", len(args.RecordHashes), args.NumRecords)
+		}
 		se.Append = &args
 		return nil
 	}
@@ -66,8 +74,8 @@ type AppendSuccessResult struct {
 }
 
 type ReadSuccessResult struct {
-	Tail int    `json:"tail"`
-	Xxh3 uint64 `json:"xxh3"`
+	Tail       int    `json:"tail"`
+	StreamHash uint64 `json:"stream_hash"`
 }
 
 type CheckTailSuccessResult struct {
@@ -186,8 +194,12 @@ type Record struct {
 }
 
 type StreamState struct {
-	Tail         uint32
-	Xxh3         uint64
+	Tail uint32
+	// Cumulative chained hash over every record body on the stream, from the
+	// head through the tail. This single value commits to the entire stream
+	// contents, so the model state stays constant-size regardless of how many
+	// records have been appended.
+	StreamHash   uint64
 	FencingToken *string
 }
 
@@ -198,7 +210,8 @@ type StreamInput struct {
 	BatchFencingToken *string
 	MatchSeqNum       *uint32
 	NumRecords        *uint32
-	Xxh3              *uint64
+	// xxh3 of each record body in the batch, in order.
+	RecordHashes []uint64
 }
 
 type StreamOutput struct {
@@ -207,7 +220,27 @@ type StreamOutput struct {
 	// Definite failures are those which are guaranteed to not have a side-effect.
 	DefiniteFailure bool
 	Tail            *uint32
-	Xxh3            *uint64
+	// Cumulative stream hash observed by a read from the head of the stream.
+	StreamHash *uint64
+}
+
+// chainHash folds one record-body hash into a cumulative stream hash.
+// The hash over a stream is the left fold of this function over the xxh3 of
+// every record body, in sequence order, starting from 0 for the empty stream.
+//
+// Must stay in sync with `chain_hash` in the Rust collector.
+func chainHash(streamHash uint64, recordHash uint64) uint64 {
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], recordHash)
+	return xxh3.HashSeed(buf[:], streamHash)
+}
+
+func foldRecordHashes(streamHash uint64, recordHashes []uint64) uint64 {
+	acc := streamHash
+	for _, rh := range recordHashes {
+		acc = chainHash(acc, rh)
+	}
+	return acc
 }
 
 func stringPtrEqual(a, b *string) bool {
@@ -222,7 +255,7 @@ var s2Model = porcupine.NondeterministicModel{
 		states := []interface{}{
 			StreamState{
 				Tail:         0,
-				Xxh3:         0,
+				StreamHash:   0,
 				FencingToken: nil,
 			},
 		}
@@ -244,7 +277,7 @@ var s2Model = porcupine.NondeterministicModel{
 			}
 			optimisticState := StreamState{
 				Tail:         startingState.Tail + *inp.NumRecords,
-				Xxh3:         *inp.Xxh3,
+				StreamHash:   foldRecordHashes(startingState.StreamHash, inp.RecordHashes),
 				FencingToken: optimisticToken,
 			}
 			if out.Failure && out.DefiniteFailure {
@@ -286,8 +319,8 @@ var s2Model = porcupine.NondeterministicModel{
 
 		} else if inp.InputType == 1 || inp.InputType == 2 {
 			// Read or Check-Tail
-			if out.Xxh3 != nil {
-				if startingState.Xxh3 != *out.Xxh3 {
+			if out.StreamHash != nil {
+				if startingState.StreamHash != *out.StreamHash {
 					return []interface{}{}
 				}
 			}
@@ -303,7 +336,7 @@ var s2Model = porcupine.NondeterministicModel{
 	Equal: func(state1, state2 interface{}) bool {
 		st1 := state1.(StreamState)
 		st2 := state2.(StreamState)
-		return st1.Tail == st2.Tail && st1.Xxh3 == st2.Xxh3 && stringPtrEqual(st1.FencingToken, st2.FencingToken)
+		return st1.Tail == st2.Tail && st1.StreamHash == st2.StreamHash && stringPtrEqual(st1.FencingToken, st2.FencingToken)
 	},
 	DescribeOperation: func(input interface{}, output interface{}) string {
 		inp := input.(StreamInput)
@@ -320,9 +353,9 @@ var s2Model = porcupine.NondeterministicModel{
 	DescribeState: func(state interface{}) string {
 		st := state.(StreamState)
 		if st.FencingToken == nil {
-			return fmt.Sprintf("tail[%d],xxh3[%d]", st.Tail, st.Xxh3)
+			return fmt.Sprintf("tail[%d],hash[%d]", st.Tail, st.StreamHash)
 		} else {
-			return fmt.Sprintf("tail[%d],xxh3[%d],token[%s]", st.Tail, st.Xxh3, *st.FencingToken)
+			return fmt.Sprintf("tail[%d],hash[%d],token[%s]", st.Tail, st.StreamHash, *st.FencingToken)
 		}
 	},
 }
@@ -352,14 +385,14 @@ func formatAppendCall(inp StreamInput, out StreamOutput) string {
 	} else {
 		matchSeqNum = ""
 	}
-	var xxh3 string
-	if inp.Xxh3 != nil {
-		xxh3 = fmt.Sprintf(", xxh3[%d]", *inp.Xxh3)
+	var lastRecordHash string
+	if len(inp.RecordHashes) > 0 {
+		lastRecordHash = fmt.Sprintf(", rh_last[%d]", inp.RecordHashes[len(inp.RecordHashes)-1])
 	} else {
-		xxh3 = ""
+		lastRecordHash = ""
 	}
 
-	inRepr := fmt.Sprintf("append(len[%d]%s%s%s%s)", *inp.NumRecords, setToken, batchToken, matchSeqNum, xxh3)
+	inRepr := fmt.Sprintf("append(len[%d]%s%s%s%s)", *inp.NumRecords, setToken, batchToken, matchSeqNum, lastRecordHash)
 
 	var outRepr string
 	if out.Failure {
@@ -376,8 +409,8 @@ func formatReadCall(inp StreamInput, out StreamOutput) string {
 	if out.Failure {
 		return fmt.Sprintf("read() -> failed")
 	} else {
-		if out.Xxh3 != nil {
-			return fmt.Sprintf("read() -> tail[%d], xxh3[%d]", *out.Tail, *out.Xxh3)
+		if out.StreamHash != nil {
+			return fmt.Sprintf("read() -> tail[%d], hash[%d]", *out.Tail, *out.StreamHash)
 		} else {
 			return fmt.Sprintf("read() -> tail[%d]", *out.Tail)
 		}
@@ -398,15 +431,14 @@ func inputFromStart(se *StartEvent) StreamInput {
 	var setFencingToken *string
 	var batchFencingToken *string
 	var matchSeqNum *uint32
-	var xxh3 *uint64
+	var recordHashes []uint64
 
 	switch {
 	case se.Append != nil:
 		inputType = 0
 		num := uint32(se.Append.NumRecords)
 		numRecords = &num
-		xxh3Val := se.Append.LastRecordXxh3
-		xxh3 = &xxh3Val
+		recordHashes = se.Append.RecordHashes
 		setFencingToken = se.Append.SetFencingToken
 		batchFencingToken = se.Append.FencingToken
 		if se.Append.MatchSeqNum != nil {
@@ -427,7 +459,7 @@ func inputFromStart(se *StartEvent) StreamInput {
 		BatchFencingToken: batchFencingToken,
 		MatchSeqNum:       matchSeqNum,
 		NumRecords:        numRecords,
-		Xxh3:              xxh3,
+		RecordHashes:      recordHashes,
 	}
 }
 
@@ -439,21 +471,21 @@ func outputFromFinish(fe *FinishEvent) StreamOutput {
 			Failure:         false,
 			DefiniteFailure: false,
 			Tail:            Ptr(uint32(fe.AppendSuccess.Tail)),
-			Xxh3:            nil,
+			StreamHash:      nil,
 		}
 	case fe.AppendDefiniteFailure:
 		return StreamOutput{
 			Failure:         true,
 			DefiniteFailure: true,
 			Tail:            nil,
-			Xxh3:            nil,
+			StreamHash:      nil,
 		}
 	case fe.AppendIndefiniteFailure:
 		return StreamOutput{
 			Failure:         true,
 			DefiniteFailure: false,
 			Tail:            nil,
-			Xxh3:            nil,
+			StreamHash:      nil,
 		}
 	// Read results
 	case fe.ReadSuccess != nil:
@@ -461,14 +493,14 @@ func outputFromFinish(fe *FinishEvent) StreamOutput {
 			Failure:         false,
 			DefiniteFailure: false,
 			Tail:            Ptr(uint32(fe.ReadSuccess.Tail)),
-			Xxh3:            Ptr(fe.ReadSuccess.Xxh3),
+			StreamHash:      Ptr(fe.ReadSuccess.StreamHash),
 		}
 	case fe.ReadFailure:
 		return StreamOutput{
 			Failure:         true,
 			DefiniteFailure: true,
 			Tail:            nil,
-			Xxh3:            nil,
+			StreamHash:      nil,
 		}
 	// CheckTail results
 	case fe.CheckTailSuccess != nil:
@@ -476,14 +508,14 @@ func outputFromFinish(fe *FinishEvent) StreamOutput {
 			Failure:         false,
 			DefiniteFailure: false,
 			Tail:            Ptr(uint32(fe.CheckTailSuccess.Tail)),
-			Xxh3:            nil,
+			StreamHash:      nil,
 		}
 	case fe.CheckTailFailure:
 		return StreamOutput{
 			Failure:         true,
 			DefiniteFailure: true,
 			Tail:            nil,
-			Xxh3:            nil,
+			StreamHash:      nil,
 		}
 	default:
 		panic("unknown finish event type")
@@ -492,6 +524,42 @@ func outputFromFinish(fe *FinishEvent) StreamOutput {
 
 func Ptr[T any](v T) *T {
 	return &v
+}
+
+func eventsFromReader(r io.Reader) ([]porcupine.Event, error) {
+	decoder := json.NewDecoder(r)
+	var events []porcupine.Event
+
+	for {
+		var record Record
+		if err := decoder.Decode(&record); err != nil {
+			if err == io.EOF {
+				return events, nil
+			}
+			return nil, fmt.Errorf("decode record at byte offset %d: %w", decoder.InputOffset(), err)
+		}
+
+		switch {
+		case record.Event.Start != nil:
+			input := inputFromStart(record.Event.Start)
+			events = append(events, porcupine.Event{
+				Kind:     porcupine.CallEvent,
+				Value:    input,
+				Id:       record.OpID,
+				ClientId: record.ClientID,
+			})
+		case record.Event.Finish != nil:
+			output := outputFromFinish(record.Event.Finish)
+			events = append(events, porcupine.Event{
+				Kind:     porcupine.ReturnEvent,
+				Value:    output,
+				Id:       record.OpID,
+				ClientId: record.ClientID,
+			})
+		default:
+			return nil, fmt.Errorf("record at byte offset %d has neither Start nor Finish event", decoder.InputOffset())
+		}
+	}
 }
 
 // Version is set at build time via ldflags
@@ -528,37 +596,10 @@ func main() {
 		defer f.Close()
 	}
 
-	var events []porcupine.Event
-	scanner := bufio.NewScanner(f)
-
-	for scanner.Scan() {
-		var r Record
-		line := scanner.Bytes()
-		if err := json.Unmarshal(line, &r); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to unmarshal line: %v\nline: %s\n", err, line)
-			os.Exit(1)
-		}
-
-		switch {
-		case r.Event.Start != nil:
-			inp := inputFromStart(r.Event.Start)
-			events = append(events, porcupine.Event{
-				Kind:     porcupine.CallEvent,
-				Value:    inp,
-				Id:       r.OpID,
-				ClientId: r.ClientID,
-			})
-		case r.Event.Finish != nil:
-			out := outputFromFinish(r.Event.Finish)
-			events = append(events, porcupine.Event{
-				Kind:     porcupine.ReturnEvent,
-				Value:    out,
-				Id:       r.OpID,
-				ClientId: r.ClientID,
-			})
-		default:
-			log.Info("skipping unknown event", "op_id", r.OpID, "client_id", r.ClientID)
-		}
+	events, err := eventsFromReader(f)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to decode history: %v\n", err)
+		os.Exit(1)
 	}
 
 	model := s2Model.ToModel()

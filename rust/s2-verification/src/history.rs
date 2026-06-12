@@ -14,7 +14,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 use tracing::{Level, warn};
 use tracing::{debug, error, trace};
-use xxhash_rust::xxh3::xxh3_64;
+use xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed};
 
 const MAX_BATCH_BYTES: usize = 1024;
 const PER_RECORD_OVERHEAD: usize = 8;
@@ -31,17 +31,30 @@ const INDEFINITE_FAILURE_BACKOFF: Duration = Duration::from_millis(1000);
 /// harder it is to verify linearizability in a reasonable amount of time.
 const MAX_CLIENT_IDS: u64 = 20;
 
+/// Fold one record-body hash into a cumulative stream hash.
+///
+/// The cumulative hash over a stream is defined as the left fold of this
+/// function over the xxh3 of every record body, in sequence order, starting
+/// from 0 for the empty stream. Each value commits to the entire stream
+/// prefix, so it can be stored in the linearizability model's state in place
+/// of the stream contents.
+///
+/// Must stay in sync with `chainHash` in the Go model.
+pub fn chain_hash(stream_hash: u64, record_hash: u64) -> u64 {
+    xxh3_64_with_seed(&record_hash.to_le_bytes(), stream_hash)
+}
+
 pub struct GeneratedBatch {
     batch: AppendRecordBatch,
-    last_xxh3: u64,
+    record_hashes: Vec<u64>,
 }
 
 /// Create a batch of records containing random data.
-/// Returns the batch and the xxh3 hash of the last record's body.
+/// Returns the batch and the xxh3 hash of each record's body.
 pub fn generate_records(num_records: usize) -> eyre::Result<GeneratedBatch> {
     let mut records = Vec::new();
     let mut batch_bytes: usize = 0;
-    let mut last_xxh3: u64 = 0;
+    let mut record_hashes = Vec::new();
     let mut rng = AntithesisRng;
 
     while records.len() < num_records && batch_bytes + PER_RECORD_OVERHEAD < MAX_BATCH_BYTES {
@@ -52,7 +65,7 @@ pub fn generate_records(num_records: usize) -> eyre::Result<GeneratedBatch> {
         rng.fill(&mut body[..]);
 
         // Compute hash before creating record
-        last_xxh3 = xxh3_64(&body);
+        record_hashes.push(xxh3_64(&body));
 
         let record = AppendRecord::new(body)?;
         let metered_size = record.metered_bytes();
@@ -62,14 +75,19 @@ pub fn generate_records(num_records: usize) -> eyre::Result<GeneratedBatch> {
     }
 
     let batch = AppendRecordBatch::try_from_iter(records)?;
-    Ok(GeneratedBatch { batch, last_xxh3 })
+    Ok(GeneratedBatch {
+        batch,
+        record_hashes,
+    })
 }
 
 #[derive(Serialize, Debug, Clone)]
 pub enum CallStart {
     Append {
         num_records: u64,
-        last_record_xxh3: u64,
+        /// xxh3 of each record body in the batch, in order. The model folds
+        /// these onto its cumulative stream hash via [`chain_hash`].
+        record_hashes: Vec<u64>,
         set_fencing_token: Option<String>,
         fencing_token: Option<String>,
         match_seq_num: Option<u64>,
@@ -82,11 +100,20 @@ pub enum CallStart {
 pub enum CallFinish {
     AppendDefiniteFailure,
     AppendIndefiniteFailure,
-    AppendSuccess { tail: u64 },
+    AppendSuccess {
+        tail: u64,
+    },
     CheckTailFailure,
-    CheckTailSuccess { tail: u64 },
+    CheckTailSuccess {
+        tail: u64,
+    },
     ReadFailure,
-    ReadSuccess { tail: u64, xxh3: u64 },
+    ReadSuccess {
+        tail: u64,
+        /// Cumulative [`chain_hash`] over every record body observed from the
+        /// head of the stream (seq_num 0) through the tail.
+        stream_hash: u64,
+    },
 }
 
 #[derive(Serialize, Debug)]
@@ -182,7 +209,7 @@ pub async fn fencing_token_client(
                 Some(expected_next_seq_num),
                 None,
                 Some(my_token.to_string()),
-                token_xxh3,
+                vec![token_xxh3],
             )
             .await?;
             match fin.event {
@@ -205,8 +232,10 @@ pub async fn fencing_token_client(
             debug!(?client_id, ?sample);
             let resp = match random_op() {
                 Op::Append => {
-                    let GeneratedBatch { batch, last_xxh3 } =
-                        generate_records(AntithesisRng.gen_range(1..1000))?;
+                    let GeneratedBatch {
+                        batch,
+                        record_hashes,
+                    } = generate_records(AntithesisRng.gen_range(1..1000))?;
                     let fin = append(
                         history_tx.clone(),
                         stream.clone(),
@@ -216,7 +245,7 @@ pub async fn fencing_token_client(
                         None,
                         Some(my_token.clone()),
                         None,
-                        last_xxh3,
+                        record_hashes,
                     )
                     .await?;
                     if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
@@ -272,8 +301,10 @@ pub async fn match_seq_num_client(
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let resp = match random_op() {
             Op::Append => {
-                let GeneratedBatch { batch, last_xxh3 } =
-                    generate_records(AntithesisRng.gen_range(1..1000))?;
+                let GeneratedBatch {
+                    batch,
+                    record_hashes,
+                } = generate_records(AntithesisRng.gen_range(1..1000))?;
                 let fin = append(
                     history_tx.clone(),
                     stream.clone(),
@@ -283,7 +314,7 @@ pub async fn match_seq_num_client(
                     Some(expected_next_seq_num),
                     None,
                     None,
-                    last_xxh3,
+                    record_hashes,
                 )
                 .await?;
                 if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
@@ -336,8 +367,10 @@ pub async fn client(
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match random_op() {
             Op::Append => {
-                let GeneratedBatch { batch, last_xxh3 } =
-                    generate_records(AntithesisRng.gen_range(1..1000))?;
+                let GeneratedBatch {
+                    batch,
+                    record_hashes,
+                } = generate_records(AntithesisRng.gen_range(1..1000))?;
                 let fin = append(
                     history_tx.clone(),
                     stream.clone(),
@@ -347,7 +380,7 @@ pub async fn client(
                     None,
                     None,
                     None,
-                    last_xxh3,
+                    record_hashes,
                 )
                 .await?;
                 if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
@@ -375,7 +408,7 @@ pub async fn client(
 #[tracing::instrument(level = Level::TRACE, skip_all)]
 async fn resolve_read_tail(mut stream: Streaming<ReadBatch>) -> eyre::Result<CallFinish> {
     let mut tail = 0;
-    let mut xxh3 = 0;
+    let mut stream_hash = 0;
     while let Some(resp) = stream.next().await {
         trace!(?resp, "read response");
         match resp {
@@ -389,9 +422,9 @@ async fn resolve_read_tail(mut stream: Streaming<ReadBatch>) -> eyre::Result<Cal
                         tail_pos.seq_num
                     );
                 }
-                if let Some(last) = batch.records.last() {
-                    xxh3 = xxh3_64(last.body.as_ref());
-                    tail = last.seq_num + 1;
+                for record in &batch.records {
+                    stream_hash = chain_hash(stream_hash, xxh3_64(record.body.as_ref()));
+                    tail = record.seq_num + 1;
                 }
             }
             Err(e) => {
@@ -400,7 +433,7 @@ async fn resolve_read_tail(mut stream: Streaming<ReadBatch>) -> eyre::Result<Cal
             }
         }
     }
-    Ok(CallFinish::ReadSuccess { tail, xxh3 })
+    Ok(CallFinish::ReadSuccess { tail, stream_hash })
 }
 
 #[tracing::instrument(level = Level::TRACE, skip(history_tx, stream))]
@@ -419,7 +452,9 @@ async fn read_session(
     let read_session = stream
         .read_session(
             ReadInput::new()
-                .with_start(ReadStart::new().with_from(ReadFrom::TailOffset(1)))
+                // Read the entire stream from the head, so the cumulative hash
+                // covers every record, not just the tail.
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 // Read must include a limit, otherwise we will enter a tailing session.
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(usize::MAX))),
         )
@@ -429,6 +464,15 @@ async fn read_session(
         Ok(stream) => {
             trace!("read_session stream");
             resolve_read_tail(stream).await?
+        }
+        // Reading from seq_num 0 on an empty stream is reported as unwritten;
+        // that is still an authoritative observation of an empty stream.
+        Err(S2Error::ReadUnwritten(pos)) if pos.seq_num == 0 => {
+            trace!("read_session on empty stream");
+            CallFinish::ReadSuccess {
+                tail: 0,
+                stream_hash: 0,
+            }
         }
         Err(_e) => {
             trace!("read_session error");
@@ -493,14 +537,18 @@ async fn append(
     fencing_token: Option<FencingToken>,
     // If this append is setting a fencing token, pass the token string here for logging
     set_fencing_token: Option<String>,
-    // The xxh3 hash of the last record body (caller must compute since fields are private)
-    last_record_xxh3: u64,
+    // The xxh3 hash of each record body, in order (caller must compute since fields are private)
+    record_hashes: Vec<u64>,
 ) -> eyre::Result<LabeledEvent> {
-    let xxh3 = last_record_xxh3;
+    assert_eq!(
+        record_hashes.len(),
+        records.len(),
+        "one hash per record in the batch"
+    );
 
     let start = CallStart::Append {
         num_records: records.len() as u64,
-        last_record_xxh3: xxh3,
+        record_hashes,
         set_fencing_token,
         fencing_token: fencing_token.as_ref().map(|t| t.to_string()),
         match_seq_num,
@@ -563,6 +611,38 @@ async fn append(
     })
 }
 
+/// Read the entire stream from the head, returning the tail and the xxh3
+/// hash of every record body, in sequence order.
+///
+/// Returns `(0, [])` for an empty stream.
+pub async fn read_all_record_hashes(stream: &S2Stream) -> eyre::Result<(u64, Vec<u64>)> {
+    let read_session = stream
+        .read_session(
+            ReadInput::new()
+                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
+                // Read must include a limit, otherwise we will enter a tailing session.
+                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(usize::MAX))),
+        )
+        .await;
+
+    let mut session = match read_session {
+        Ok(session) => session,
+        Err(S2Error::ReadUnwritten(pos)) if pos.seq_num == 0 => return Ok((0, Vec::new())),
+        Err(e) => return Err(eyre::eyre!(e)),
+    };
+
+    let mut tail = 0;
+    let mut record_hashes = Vec::new();
+    while let Some(resp) = session.next().await {
+        let batch = resp.map_err(|e| eyre::eyre!(e))?;
+        for record in &batch.records {
+            record_hashes.push(xxh3_64(record.body.as_ref()));
+            tail = record.seq_num + 1;
+        }
+    }
+    Ok((tail, record_hashes))
+}
+
 /// Since the linearizability model expects a stream's tail
 /// to start at 0, this fn allows us to "correct" the initial state
 /// for any non-empty stream, by spoofing a successful append from 0
@@ -571,12 +651,17 @@ pub async fn initialize_tail(
     history_tx: UnboundedSender<LabeledEvent>,
     op_id: u64,
     tail: u64,
-    xxh3: u64,
+    record_hashes: Vec<u64>,
 ) -> eyre::Result<()> {
+    assert_eq!(
+        record_hashes.len() as u64,
+        tail,
+        "rectifying append must cover every record from the head of the stream"
+    );
     history_tx.send(LabeledEvent {
         event: Event::Start(CallStart::Append {
             num_records: tail,
-            last_record_xxh3: xxh3,
+            record_hashes,
             set_fencing_token: None,
             fencing_token: None,
             match_seq_num: None,
@@ -591,4 +676,32 @@ pub async fn initialize_tail(
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// These vectors are mirrored in the Go model's tests (`TestChainHashVectors`)
+    /// to guarantee both sides compute the same cumulative stream hash.
+    #[test]
+    fn chain_hash_vectors() {
+        let h1 = chain_hash(0, xxh3_64(b"foo"));
+        let h2 = chain_hash(h1, xxh3_64(b"bar"));
+        let h3 = chain_hash(h2, xxh3_64(b"baz"));
+        assert_eq!(xxh3_64(b"foo"), 0xab6e5f64077e7d8a);
+        assert_eq!(h1, 0x4d2b003ee417c3a5);
+        assert_eq!(h2, 0x132e5d5dd7936edd);
+        assert_eq!(h3, 0x732ee99abc5002ff);
+    }
+
+    #[test]
+    fn read_success_serializes_stream_hash() {
+        let json = serde_json::to_string(&CallFinish::ReadSuccess {
+            tail: 7,
+            stream_hash: 42,
+        })
+        .expect("serialize read success");
+        assert_eq!(json, r#"{"ReadSuccess":{"tail":7,"stream_hash":42}}"#);
+    }
 }

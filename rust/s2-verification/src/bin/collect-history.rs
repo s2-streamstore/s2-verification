@@ -5,13 +5,13 @@ use futures::stream::FuturesUnordered;
 use s2_sdk::{
     S2,
     types::{
-        AppendRetryPolicy, BasinName, CreateStreamInput, ReadFrom, ReadInput, ReadLimits,
-        ReadStart, ReadStop, RetryConfig, S2Config, S2Endpoints, S2Error, StreamName,
+        AppendRetryPolicy, BasinName, CreateStreamInput, RetryConfig, S2Config, S2Endpoints,
+        S2Error, StreamName,
     },
 };
 use s2_verification::history::{
     CallFinish, Event, LabeledEvent, client, fencing_token_client, initialize_tail,
-    match_seq_num_client,
+    match_seq_num_client, read_all_record_hashes,
 };
 use std::env;
 use std::num::NonZeroU32;
@@ -22,7 +22,6 @@ use tokio::io::AsyncWriteExt;
 use tracing::{debug, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use xxhash_rust::xxh3::xxh3_64;
 
 #[derive(ValueEnum, Clone, Debug)]
 enum Workflow {
@@ -99,40 +98,21 @@ async fn main() -> eyre::Result<()> {
     let op_ids = Arc::new(AtomicU64::new(0));
 
     let stream_client = s2.basin(basin.clone()).stream(stream.clone());
-    let _resp = stream_client.check_tail().await?;
-    let batch = stream_client
-        .read(
-            ReadInput::new()
-                .with_start(ReadStart::new().with_from(ReadFrom::TailOffset(1)))
-                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(1))),
-        )
-        .await;
 
-    // See if the specified stream has been written to; if it has, grab the tail and hash.
+    // See if the specified stream has been written to; if it has, read the entire
+    // stream from the head so the rectifying append carries every record's hash.
     //
     // Note that we are not using `check_tail` since we need access not just to the tail, but
-    // also the actual record's content.
-    let rectify = match batch {
-        Ok(batch) => {
-            let last = batch.records.last().expect("batch has at least one record");
-            let tail = last.seq_num + 1;
-            Some((tail, xxh3_64(last.body.as_ref())))
-        }
-        Err(S2Error::ReadUnwritten(position)) => {
-            assert_eq!(position.seq_num, 0);
-            assert_eq!(position.timestamp, 0);
-            None
-        }
-        Err(e) => return Err(eyre!(e)),
-    };
+    // also the actual records' contents.
+    let (tail, record_hashes) = read_all_record_hashes(&stream_client).await?;
 
-    if let Some((tail, xxh3)) = rectify {
+    if tail > 0 {
         info!("stream is not empty, inserting a starter append event to rectify");
         initialize_tail(
             history_tx.clone(),
             op_ids.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             tail,
-            xxh3,
+            record_hashes,
         )
         .await?;
     }

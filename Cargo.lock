@@ -1565,14 +1565,13 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s2-api"
-version = "0.29.0"
+version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfc12416f2eba48f506823136a9a4c171fc225de72179f071e8aab5566904cdb"
+checksum = "0ca965c408f0cd153ae0952bd5c6b6117041773421ccd0340f582e3a43968937"
 dependencies = [
  "base64ct",
  "bytes",
  "compact_str",
- "enumset",
  "flate2",
  "futures",
  "http",
@@ -1591,9 +1590,9 @@ dependencies = [
 
 [[package]]
 name = "s2-common"
-version = "0.35.0"
+version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c6f306f4b4b45a6ae7e9db442e5e5247f8903170bf2367c206cb7ac8780dec"
+checksum = "cc61e655b6fa10d0c9ce905dce2d8b8ea7c70a415866485253331ffa54a708c2"
 dependencies = [
  "aegis",
  "aes-gcm",
@@ -1613,9 +1612,9 @@ dependencies = [
 
 [[package]]
 name = "s2-sdk"
-version = "0.29.0"
+version = "0.31.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f45a665e36ca7e9e29ce030afdf2f458255b62e7b824d4740c8edfe392c2820e"
+checksum = "341e00f248a685c53e65a6889aabbfcefb9035abb69730e8b3335aeea89b8d13"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -1652,7 +1651,7 @@ dependencies = [
 
 [[package]]
 name = "s2-verification"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "antithesis_sdk",
  "clap",
