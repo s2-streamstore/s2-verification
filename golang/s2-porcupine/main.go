@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -541,6 +541,42 @@ func Ptr[T any](v T) *T {
 	return &v
 }
 
+func eventsFromReader(r io.Reader) ([]porcupine.Event, error) {
+	decoder := json.NewDecoder(r)
+	var events []porcupine.Event
+
+	for {
+		var record Record
+		if err := decoder.Decode(&record); err != nil {
+			if err == io.EOF {
+				return events, nil
+			}
+			return nil, fmt.Errorf("decode record at byte offset %d: %w", decoder.InputOffset(), err)
+		}
+
+		switch {
+		case record.Event.Start != nil:
+			input := inputFromStart(record.Event.Start)
+			events = append(events, porcupine.Event{
+				Kind:     porcupine.CallEvent,
+				Value:    input,
+				Id:       record.OpID,
+				ClientId: record.ClientID,
+			})
+		case record.Event.Finish != nil:
+			output := outputFromFinish(record.Event.Finish)
+			events = append(events, porcupine.Event{
+				Kind:     porcupine.ReturnEvent,
+				Value:    output,
+				Id:       record.OpID,
+				ClientId: record.ClientID,
+			})
+		default:
+			return nil, fmt.Errorf("record at byte offset %d has neither Start nor Finish event", decoder.InputOffset())
+		}
+	}
+}
+
 // Version is set at build time via ldflags
 var Version = "dev"
 
@@ -575,37 +611,10 @@ func main() {
 		defer f.Close()
 	}
 
-	var events []porcupine.Event
-	scanner := bufio.NewScanner(f)
-
-	for scanner.Scan() {
-		var r Record
-		line := scanner.Bytes()
-		if err := json.Unmarshal(line, &r); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to unmarshal line: %v\nline: %s\n", err, line)
-			os.Exit(1)
-		}
-
-		switch {
-		case r.Event.Start != nil:
-			inp := inputFromStart(r.Event.Start)
-			events = append(events, porcupine.Event{
-				Kind:     porcupine.CallEvent,
-				Value:    inp,
-				Id:       r.OpID,
-				ClientId: r.ClientID,
-			})
-		case r.Event.Finish != nil:
-			out := outputFromFinish(r.Event.Finish)
-			events = append(events, porcupine.Event{
-				Kind:     porcupine.ReturnEvent,
-				Value:    out,
-				Id:       r.OpID,
-				ClientId: r.ClientID,
-			})
-		default:
-			log.Info("skipping unknown event", "op_id", r.OpID, "client_id", r.ClientID)
-		}
+	events, err := eventsFromReader(f)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to decode history: %v\n", err)
+		os.Exit(1)
 	}
 
 	model := s2Model.ToModel()

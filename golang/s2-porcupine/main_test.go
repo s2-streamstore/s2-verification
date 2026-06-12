@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/anishathalye/porcupine"
@@ -25,6 +28,82 @@ func TestChainHashVectors(t *testing.T) {
 	}
 	if h3 != 0x732ee99abc5002ff {
 		t.Errorf("h3 = %#x", h3)
+	}
+}
+
+func TestEventsFromReaderHandlesLargeRecordHashLine(t *testing.T) {
+	const numRecords = 5000
+
+	recordHashes := make([]uint64, numRecords)
+	for i := range recordHashes {
+		recordHashes[i] = ^uint64(0) - uint64(i)
+	}
+
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	start := map[string]any{
+		"event": map[string]any{
+			"Start": map[string]any{
+				"Append": map[string]any{
+					"num_records":       numRecords,
+					"record_hashes":     recordHashes,
+					"set_fencing_token": nil,
+					"fencing_token":     nil,
+					"match_seq_num":     nil,
+				},
+			},
+		},
+		"client_id": 0,
+		"op_id":     0,
+	}
+	if err := encoder.Encode(start); err != nil {
+		t.Fatalf("encode start: %v", err)
+	}
+	if firstLineLen := buf.Len(); firstLineLen <= 64*1024 {
+		t.Fatalf("expected first line to exceed scanner default limit, got %d bytes", firstLineLen)
+	}
+
+	finish := map[string]any{
+		"event": map[string]any{
+			"Finish": map[string]any{
+				"AppendSuccess": map[string]any{
+					"tail": numRecords,
+				},
+			},
+		},
+		"client_id": 0,
+		"op_id":     0,
+	}
+	if err := encoder.Encode(finish); err != nil {
+		t.Fatalf("encode finish: %v", err)
+	}
+
+	events, err := eventsFromReader(&buf)
+	if err != nil {
+		t.Fatalf("eventsFromReader: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	input, ok := events[0].Value.(StreamInput)
+	if !ok {
+		t.Fatalf("expected StreamInput, got %T", events[0].Value)
+	}
+	if len(input.RecordHashes) != numRecords {
+		t.Fatalf("expected %d record hashes, got %d", numRecords, len(input.RecordHashes))
+	}
+
+	model := s2Model.ToModel()
+	result, _ := porcupine.CheckEventsVerbose(model, events, 0)
+	if result != porcupine.Ok {
+		t.Errorf("Expected oversized linearizable history to pass, got result: %v", result)
+	}
+}
+
+func TestEventsFromReaderRejectsMalformedJSON(t *testing.T) {
+	_, err := eventsFromReader(strings.NewReader(`{"event":{"Start":"Read"},"client_id":1,"op_id":1`))
+	if err == nil {
+		t.Fatal("expected malformed JSON to fail")
 	}
 }
 
