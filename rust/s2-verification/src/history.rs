@@ -4,14 +4,14 @@ use s2_sdk::{
     S2Stream,
     types::{
         AppendInput, AppendRecord, AppendRecordBatch, CommandRecord, FencingToken, MeteredBytes,
-        ReadBatch, ReadFrom, ReadInput, ReadLimits, ReadStart, ReadStop, S2Error, Streaming,
+        ReadBatch, ReadFrom, ReadInput, ReadLimits, ReadStart, ReadStop, S2Error,
     },
 };
 use serde::Serialize;
 use std::sync::{Arc, atomic::AtomicU64};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio_stream::StreamExt;
+use tokio_stream::{Stream, StreamExt};
 use tracing::{Level, warn};
 use tracing::{debug, error, trace};
 use xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed};
@@ -406,7 +406,9 @@ pub async fn client(
 }
 
 #[tracing::instrument(level = Level::TRACE, skip_all)]
-async fn resolve_read_tail(mut stream: Streaming<ReadBatch>) -> eyre::Result<CallFinish> {
+async fn resolve_read_tail(
+    mut stream: impl Stream<Item = Result<ReadBatch, S2Error>> + Unpin,
+) -> eyre::Result<CallFinish> {
     let mut tail = 0;
     let mut stream_hash = 0;
     while let Some(resp) = stream.next().await {
