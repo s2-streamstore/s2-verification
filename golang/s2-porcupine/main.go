@@ -16,11 +16,11 @@ import (
 )
 
 type AppendArgs struct {
-	NumRecords      int      `json:"num_records"`
+	NumRecords      uint64   `json:"num_records"`
 	RecordHashes    []uint64 `json:"record_hashes"`
 	SetFencingToken *string  `json:"set_fencing_token"`
 	FencingToken    *string  `json:"fencing_token"`
-	MatchSeqNum     *int     `json:"match_seq_num"`
+	MatchSeqNum     *uint64  `json:"match_seq_num"`
 }
 
 type StartEvent struct {
@@ -59,7 +59,7 @@ func (se *StartEvent) UnmarshalJSON(data []byte) error {
 		// One hash per record is required to fold the batch onto the model's
 		// cumulative stream hash. A mismatch usually means the history was
 		// collected with an older, incompatible collector.
-		if len(args.RecordHashes) != args.NumRecords {
+		if uint64(len(args.RecordHashes)) != args.NumRecords {
 			return fmt.Errorf("append has %d record_hashes but %d records", len(args.RecordHashes), args.NumRecords)
 		}
 		se.Append = &args
@@ -70,16 +70,16 @@ func (se *StartEvent) UnmarshalJSON(data []byte) error {
 }
 
 type AppendSuccessResult struct {
-	Tail int `json:"tail"`
+	Tail uint64 `json:"tail"`
 }
 
 type ReadSuccessResult struct {
-	Tail       int    `json:"tail"`
+	Tail       uint64 `json:"tail"`
 	StreamHash uint64 `json:"stream_hash"`
 }
 
 type CheckTailSuccessResult struct {
-	Tail int `json:"tail"`
+	Tail uint64 `json:"tail"`
 }
 
 type FinishEvent struct {
@@ -194,7 +194,7 @@ type Record struct {
 }
 
 type StreamState struct {
-	Tail uint32
+	Tail uint64
 	// Cumulative chained hash over every record body on the stream, from the
 	// head through the tail. This single value commits to the entire stream
 	// contents, so the model state stays constant-size regardless of how many
@@ -208,8 +208,8 @@ type StreamInput struct {
 	InputType         uint8
 	SetFencingToken   *string
 	BatchFencingToken *string
-	MatchSeqNum       *uint32
-	NumRecords        *uint32
+	MatchSeqNum       *uint64
+	NumRecords        *uint64
 	// xxh3 of each record body in the batch, in order.
 	RecordHashes []uint64
 }
@@ -219,7 +219,7 @@ type StreamOutput struct {
 	Failure bool
 	// Definite failures are those which are guaranteed to not have a side-effect.
 	DefiniteFailure bool
-	Tail            *uint32
+	Tail            *uint64
 	// Cumulative stream hash observed by a read from the head of the stream.
 	StreamHash *uint64
 }
@@ -427,22 +427,22 @@ func formatCheckTailCall(inp StreamInput, out StreamOutput) string {
 
 func inputFromStart(se *StartEvent) StreamInput {
 	var inputType uint8
-	var numRecords *uint32
+	var numRecords *uint64
 	var setFencingToken *string
 	var batchFencingToken *string
-	var matchSeqNum *uint32
+	var matchSeqNum *uint64
 	var recordHashes []uint64
 
 	switch {
 	case se.Append != nil:
 		inputType = 0
-		num := uint32(se.Append.NumRecords)
+		num := se.Append.NumRecords
 		numRecords = &num
 		recordHashes = se.Append.RecordHashes
 		setFencingToken = se.Append.SetFencingToken
 		batchFencingToken = se.Append.FencingToken
 		if se.Append.MatchSeqNum != nil {
-			seq := uint32(*se.Append.MatchSeqNum)
+			seq := *se.Append.MatchSeqNum
 			matchSeqNum = &seq
 		}
 	case se.Read:
@@ -470,7 +470,7 @@ func outputFromFinish(fe *FinishEvent) StreamOutput {
 		return StreamOutput{
 			Failure:         false,
 			DefiniteFailure: false,
-			Tail:            Ptr(uint32(fe.AppendSuccess.Tail)),
+			Tail:            Ptr(fe.AppendSuccess.Tail),
 			StreamHash:      nil,
 		}
 	case fe.AppendDefiniteFailure:
@@ -492,7 +492,7 @@ func outputFromFinish(fe *FinishEvent) StreamOutput {
 		return StreamOutput{
 			Failure:         false,
 			DefiniteFailure: false,
-			Tail:            Ptr(uint32(fe.ReadSuccess.Tail)),
+			Tail:            Ptr(fe.ReadSuccess.Tail),
 			StreamHash:      Ptr(fe.ReadSuccess.StreamHash),
 		}
 	case fe.ReadFailure:
@@ -507,7 +507,7 @@ func outputFromFinish(fe *FinishEvent) StreamOutput {
 		return StreamOutput{
 			Failure:         false,
 			DefiniteFailure: false,
-			Tail:            Ptr(uint32(fe.CheckTailSuccess.Tail)),
+			Tail:            Ptr(fe.CheckTailSuccess.Tail),
 			StreamHash:      nil,
 		}
 	case fe.CheckTailFailure:

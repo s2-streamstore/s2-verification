@@ -131,16 +131,16 @@ func TestBasicNoConcurrency(t *testing.T) {
 
 	events := []porcupine.Event{
 		// Append (num_records=4)
-		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint32(4)), RecordHashes: batch}, Id: 0, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4))}, Id: 0, ClientId: 0},
+		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint64(4)), RecordHashes: batch}, Id: 0, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4))}, Id: 0, ClientId: 0},
 
 		// Read
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 1}, Id: 1, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4)), StreamHash: Ptr(h)}, Id: 1, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4)), StreamHash: Ptr(h)}, Id: 1, ClientId: 0},
 
 		// Check-Tail
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 2}, Id: 2, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4))}, Id: 2, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4))}, Id: 2, ClientId: 0},
 	}
 
 	model := s2Model.ToModel()
@@ -158,28 +158,28 @@ func TestBasicNoConcurrencyDefiniteFailure1(t *testing.T) {
 
 	events := []porcupine.Event{
 		// Append (num_records=4)
-		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint32(4)), RecordHashes: batch1}, Id: 0, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4))}, Id: 0, ClientId: 0},
+		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint64(4)), RecordHashes: batch1}, Id: 0, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4))}, Id: 0, ClientId: 0},
 		// actual tail = 4
 
 		// Read
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 1}, Id: 1, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4)), StreamHash: Ptr(h1)}, Id: 1, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4)), StreamHash: Ptr(h1)}, Id: 1, ClientId: 0},
 		// actual tail = 4
 
 		// Check-Tail
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 2}, Id: 2, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4))}, Id: 2, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4))}, Id: 2, ClientId: 0},
 		// actual tail = 4
 
 		// Append (num_records=5), failed unambiguously
-		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint32(5)), RecordHashes: batch2}, Id: 3, ClientId: 0},
+		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint64(5)), RecordHashes: batch2}, Id: 3, ClientId: 0},
 		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: true, DefiniteFailure: true}, Id: 3, ClientId: 0},
 		// actual tail = 4
 
 		// Read
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 1}, Id: 4, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4)), StreamHash: Ptr(h1)}, Id: 4, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4)), StreamHash: Ptr(h1)}, Id: 4, ClientId: 0},
 	}
 
 	model := s2Model.ToModel()
@@ -197,22 +197,22 @@ func TestBasicNoConcurrencyDefiniteFailure2(t *testing.T) {
 
 	events := []porcupine.Event{
 		// Append (num_records=4)
-		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint32(4)), RecordHashes: batch1}, Id: 0, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4))}, Id: 0, ClientId: 0},
+		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint64(4)), RecordHashes: batch1}, Id: 0, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4))}, Id: 0, ClientId: 0},
 		// actual tail = 4
 
 		// Read
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 1}, Id: 1, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4)), StreamHash: Ptr(h1)}, Id: 1, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4)), StreamHash: Ptr(h1)}, Id: 1, ClientId: 0},
 		// actual tail = 4
 
 		// Check-Tail
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 2}, Id: 2, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4))}, Id: 2, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4))}, Id: 2, ClientId: 0},
 		// actual tail = 4
 
 		// Append (num_records=5), failed unambiguously
-		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint32(5)), RecordHashes: batch2}, Id: 3, ClientId: 0},
+		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint64(5)), RecordHashes: batch2}, Id: 3, ClientId: 0},
 		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: true, DefiniteFailure: true}, Id: 3, ClientId: 0},
 		// actual tail = 4
 
@@ -220,7 +220,7 @@ func TestBasicNoConcurrencyDefiniteFailure2(t *testing.T) {
 		// this should break linearizability:
 		//  - it supposes that the prior append actually did succeed, when we are told it must not have
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 1}, Id: 4, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(9)), StreamHash: Ptr(h2)}, Id: 4, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(9)), StreamHash: Ptr(h2)}, Id: 4, ClientId: 0},
 	}
 
 	model := s2Model.ToModel()
@@ -238,28 +238,28 @@ func TestBasicNoConcurrencyIndefiniteFailure1(t *testing.T) {
 
 	events := []porcupine.Event{
 		// Append (num_records=4)
-		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint32(4)), RecordHashes: batch1}, Id: 0, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4))}, Id: 0, ClientId: 0},
+		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint64(4)), RecordHashes: batch1}, Id: 0, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4))}, Id: 0, ClientId: 0},
 		// actual tail = 4
 
 		// Read
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 1}, Id: 1, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4)), StreamHash: Ptr(h1)}, Id: 1, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4)), StreamHash: Ptr(h1)}, Id: 1, ClientId: 0},
 		// actual tail = 4
 
 		// Check-Tail
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 2}, Id: 2, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4))}, Id: 2, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4))}, Id: 2, ClientId: 0},
 		// actual tail = 4
 
 		// Append (num_records=5), failed ambiguously
-		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint32(5)), RecordHashes: batch2}, Id: 3, ClientId: 0},
+		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint64(5)), RecordHashes: batch2}, Id: 3, ClientId: 0},
 		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: true}, Id: 3, ClientId: 0},
 		// actual tail = 4, or 9
 
 		// Read
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 1}, Id: 4, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(9)), StreamHash: Ptr(h2)}, Id: 4, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(9)), StreamHash: Ptr(h2)}, Id: 4, ClientId: 0},
 		// actual tail = 9
 	}
 
@@ -277,28 +277,28 @@ func TestBasicNoConcurrencyIndefiniteFailure2(t *testing.T) {
 
 	events := []porcupine.Event{
 		// Append (num_records=4)
-		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint32(4)), RecordHashes: batch1}, Id: 0, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4))}, Id: 0, ClientId: 0},
+		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint64(4)), RecordHashes: batch1}, Id: 0, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4))}, Id: 0, ClientId: 0},
 		// actual tail = 4
 
 		// Read
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 1}, Id: 1, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4)), StreamHash: Ptr(h1)}, Id: 1, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4)), StreamHash: Ptr(h1)}, Id: 1, ClientId: 0},
 		// actual tail = 4
 
 		// Check-Tail
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 2}, Id: 2, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4))}, Id: 2, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4))}, Id: 2, ClientId: 0},
 		// actual tail = 4
 
 		// Append (num_records=5), failed ambiguously
-		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint32(5)), RecordHashes: batch2}, Id: 3, ClientId: 0},
+		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint64(5)), RecordHashes: batch2}, Id: 3, ClientId: 0},
 		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: true}, Id: 3, ClientId: 0},
 		// actual tail = 4, or 9
 
 		// Read
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 1}, Id: 4, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(4)), StreamHash: Ptr(h1)}, Id: 4, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(4)), StreamHash: Ptr(h1)}, Id: 4, ClientId: 0},
 		// actual tail = 4
 	}
 
@@ -307,6 +307,38 @@ func TestBasicNoConcurrencyIndefiniteFailure2(t *testing.T) {
 
 	if result != porcupine.Ok {
 		t.Errorf("Expected linearizable events to pass, got result: %v", result)
+	}
+}
+
+// Sequence numbers above 2^32 must be represented exactly: a match_seq_num
+// that collides with the true tail modulo 2^32 must still be rejected.
+func TestLargeSeqNumsNotTruncated(t *testing.T) {
+	const bigTail = uint64(1)<<32 + 5
+	batch1 := []uint64{11}
+	batch2 := []uint64{22}
+
+	events := []porcupine.Event{
+		// Append a batch bringing the tail past 2^32.
+		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(bigTail), RecordHashes: batch1}, Id: 0, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(bigTail)}, Id: 0, ClientId: 0},
+
+		// match_seq_num=5 equals the tail mod 2^32 but not the true tail;
+		// a successful append here must not be linearizable.
+		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint64(1)), RecordHashes: batch2, MatchSeqNum: Ptr(uint64(5))}, Id: 1, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(bigTail + 1)}, Id: 1, ClientId: 0},
+	}
+
+	model := s2Model.ToModel()
+	result, _ := porcupine.CheckEventsVerbose(model, events, 0)
+	if result == porcupine.Ok {
+		t.Errorf("Expected truncation-colliding match_seq_num append to fail, got result: %v", result)
+	}
+
+	// Sanity check: the same history with the correct match_seq_num passes.
+	events[2].Value = StreamInput{InputType: 0, NumRecords: Ptr(uint64(1)), RecordHashes: batch2, MatchSeqNum: Ptr(bigTail)}
+	result, _ = porcupine.CheckEventsVerbose(model, events, 0)
+	if result != porcupine.Ok {
+		t.Errorf("Expected matching large match_seq_num append to pass, got result: %v", result)
 	}
 }
 
@@ -321,16 +353,16 @@ func TestReadDetectsCorruptedPrefix(t *testing.T) {
 	hCorrupt := foldRecordHashes(foldRecordHashes(0, corrupted), batch2)
 
 	events := []porcupine.Event{
-		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint32(2)), RecordHashes: batch1}, Id: 0, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(2))}, Id: 0, ClientId: 0},
+		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint64(2)), RecordHashes: batch1}, Id: 0, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(2))}, Id: 0, ClientId: 0},
 
-		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint32(1)), RecordHashes: batch2}, Id: 1, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(3))}, Id: 1, ClientId: 0},
+		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint64(1)), RecordHashes: batch2}, Id: 1, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(3))}, Id: 1, ClientId: 0},
 
 		// Read observes the right tail, and ends with the right last record
 		// (batch2), but the stream prefix does not match what was acknowledged.
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 1}, Id: 2, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(3)), StreamHash: Ptr(hCorrupt)}, Id: 2, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(3)), StreamHash: Ptr(hCorrupt)}, Id: 2, ClientId: 0},
 	}
 
 	model := s2Model.ToModel()
@@ -349,14 +381,14 @@ func TestReadVerifiesWholeStream(t *testing.T) {
 	h := foldRecordHashes(foldRecordHashes(0, batch1), batch2)
 
 	events := []porcupine.Event{
-		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint32(2)), RecordHashes: batch1}, Id: 0, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(2))}, Id: 0, ClientId: 0},
+		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint64(2)), RecordHashes: batch1}, Id: 0, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(2))}, Id: 0, ClientId: 0},
 
-		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint32(1)), RecordHashes: batch2}, Id: 1, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(3))}, Id: 1, ClientId: 0},
+		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint64(1)), RecordHashes: batch2}, Id: 1, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(3))}, Id: 1, ClientId: 0},
 
 		{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 1}, Id: 2, ClientId: 0},
-		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint32(3)), StreamHash: Ptr(h)}, Id: 2, ClientId: 0},
+		{Kind: porcupine.ReturnEvent, Value: StreamOutput{Failure: false, Tail: Ptr(uint64(3)), StreamHash: Ptr(h)}, Id: 2, ClientId: 0},
 	}
 
 	model := s2Model.ToModel()
