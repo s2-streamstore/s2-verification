@@ -2,9 +2,10 @@ use antithesis_sdk::random::AntithesisRng;
 use rand::Rng;
 use s2_sdk::{
     S2Stream,
+    error::{ReadError, ReadSessionError},
     types::{
         AppendInput, AppendRecord, AppendRecordBatch, CommandRecord, FencingToken, MeteredBytes,
-        ReadBatch, ReadFrom, ReadInput, ReadLimits, ReadStart, ReadStop, S2Error,
+        ReadBatch, ReadFrom, ReadInput, ReadLimits, ReadStart, ReadStop,
     },
 };
 use serde::Serialize;
@@ -407,7 +408,7 @@ pub async fn client(
 
 #[tracing::instrument(level = Level::TRACE, skip_all)]
 async fn resolve_read_tail(
-    mut stream: impl Stream<Item = Result<ReadBatch, S2Error>> + Unpin,
+    mut stream: impl Stream<Item = Result<ReadBatch, ReadSessionError>> + Unpin,
 ) -> eyre::Result<CallFinish> {
     let mut tail = 0;
     let mut stream_hash = 0;
@@ -469,7 +470,7 @@ async fn read_session(
         }
         // Reading from seq_num 0 on an empty stream is reported as unwritten;
         // that is still an authoritative observation of an empty stream.
-        Err(S2Error::ReadUnwritten(pos)) if pos.seq_num == 0 => {
+        Err(ReadSessionError::Read(ReadError::ReadUnwritten(pos))) if pos.seq_num == 0 => {
             trace!("read_session on empty stream");
             CallFinish::ReadSuccess {
                 tail: 0,
@@ -574,24 +575,8 @@ async fn append(
         Ok(ack) => CallFinish::AppendSuccess {
             tail: ack.end.seq_num,
         },
-        Err(e) => match &e {
-            // Validation errors are definite failures
-            S2Error::Validation(_) => CallFinish::AppendDefiniteFailure,
-            // Append condition failures (fencing token mismatch, seq num mismatch) are definite
-            S2Error::AppendConditionFailed(_) => CallFinish::AppendDefiniteFailure,
-            // Server errors - check the code for definite vs indefinite
-            S2Error::Server(err) => {
-                match err.code.as_str() {
-                    // Re: table on side-effect possibilities at <https://s2.dev/docs/api/error-codes>
-                    "rate_limited" | "hot_server" | "transaction_conflict" => {
-                        CallFinish::AppendDefiniteFailure
-                    }
-                    _ => CallFinish::AppendIndefiniteFailure,
-                }
-            }
-            // Client errors and other errors are indefinite (might succeed on retry)
-            _ => CallFinish::AppendIndefiniteFailure,
-        },
+        Err(e) if e.has_no_side_effects() => CallFinish::AppendDefiniteFailure,
+        Err(_) => CallFinish::AppendIndefiniteFailure,
     };
 
     match finish {
@@ -629,7 +614,9 @@ pub async fn read_all_record_hashes(stream: &S2Stream) -> eyre::Result<(u64, Vec
 
     let mut session = match read_session {
         Ok(session) => session,
-        Err(S2Error::ReadUnwritten(pos)) if pos.seq_num == 0 => return Ok((0, Vec::new())),
+        Err(ReadSessionError::Read(ReadError::ReadUnwritten(pos))) if pos.seq_num == 0 => {
+            return Ok((0, Vec::new()));
+        }
         Err(e) => return Err(eyre::eyre!(e)),
     };
 

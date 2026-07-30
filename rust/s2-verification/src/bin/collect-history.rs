@@ -4,9 +4,10 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use s2_sdk::{
     S2,
+    error::ErrorCode,
     types::{
         AppendRetryPolicy, BasinName, CreateStreamInput, RetryConfig, S2Config, S2Endpoints,
-        S2Error, StreamName,
+        StreamName,
     },
 };
 use s2_verification::history::{
@@ -89,7 +90,12 @@ async fn main() -> eyre::Result<()> {
         .await
     {
         Ok(_) => true,
-        Err(S2Error::Server(e)) if e.code.as_str() == "resource_already_exists" => true,
+        Err(e)
+            if e.server_error().and_then(|error| error.known_code())
+                == Some(ErrorCode::ResourceAlreadyExists) =>
+        {
+            true
+        }
         Err(e) => return Err(eyre!(e)),
     };
 
