@@ -3,7 +3,3 @@ members = [
     "rust/s2-verification",
 ]
 resolver = "2"
-
-[patch.crates-io]
-# Remove this patch after the breaking SDK APIs are available in a release.
-s2-sdk = { git = "https://github.com/s2-streamstore/s2", rev = "e7268fea95befce79ee743c20306655bfde5354e" }
