@@ -12,7 +12,7 @@ futures = "0.3.32"
 # required for antithesis_sdk rand compatibility
 # needs to be 0.8 till it upgrades
 rand = "0.8"
-s2-sdk = ">=0.29, <1"
+s2-sdk = ">=0.34, <1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 tokio = { version = "1.52.3", features = ["full"] }
