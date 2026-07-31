@@ -5,7 +5,7 @@ use s2_sdk::{
     error::{ReadError, ReadSessionError},
     types::{
         AppendInput, AppendRecord, AppendRecordBatch, CommandRecord, FencingToken, MeteredBytes,
-        ReadBatch, ReadFrom, ReadInput, ReadLimits, ReadStart, ReadStop,
+        ReadBatch, ReadFrom, ReadInput, ReadLimits, ReadSessionConfig, ReadStart, ReadStop,
     },
 };
 use serde::Serialize;
@@ -460,6 +460,7 @@ async fn read_session(
                 .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 // Read must include a limit, otherwise we will enter a tailing session.
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(usize::MAX))),
+            ReadSessionConfig::default(),
         )
         .await;
 
@@ -609,6 +610,7 @@ pub async fn read_all_record_hashes(stream: &S2Stream) -> eyre::Result<(u64, Vec
                 .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
                 // Read must include a limit, otherwise we will enter a tailing session.
                 .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(usize::MAX))),
+            ReadSessionConfig::default(),
         )
         .await;
 

@@ -5,5 +5,5 @@ members = [
 resolver = "2"
 
 [patch.crates-io]
-# Remove this patch after the granular error API is available in a released SDK.
-s2-sdk = { git = "https://github.com/s2-streamstore/s2", rev = "a298277bd0bec8c622faf69739068d0cd5995774" }
+# Remove this patch after the breaking SDK APIs are available in a release.
+s2-sdk = { git = "https://github.com/s2-streamstore/s2", rev = "e7268fea95befce79ee743c20306655bfde5354e" }
