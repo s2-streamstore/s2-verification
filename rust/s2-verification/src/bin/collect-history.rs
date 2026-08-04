@@ -1,3 +1,5 @@
+#[cfg(feature = "antithesis")]
+use antithesis_instrumentation as _;
 use clap::{Parser, ValueEnum};
 use eyre::eyre;
 use futures::StreamExt;
