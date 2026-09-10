@@ -212,10 +212,13 @@ pub async fn resolve_deferred(
 /// - found at exactly one position, which no other deferred append could also occupy: the
 ///   append became durable there, so it finishes as `AppendSuccess { tail }`, which pins it to a
 ///   single linearization point;
-/// - not found, and the stream has not been trimmed: it never became durable, and since no
-///   client is still running nothing can have observed it, so it finishes as
-///   `AppendDefiniteFailure`;
+/// - not found, and the stream has not been trimmed: nothing in the history can have observed
+///   it, since no client is still running, so it finishes as `AppendDefiniteFailure`. Should
+///   the request still commit afterwards, that is outside the recorded history;
 /// - otherwise it is ambiguous and left as an `AppendIndefiniteFailure`.
+///
+/// Both resolved outcomes are one of the two the checker would have had to consider for the
+/// indefinite one, so resolving can never make a non-linearizable history pass.
 pub fn resolve_deferred_against(
     tail: u64,
     stream_hashes: &[u64],
