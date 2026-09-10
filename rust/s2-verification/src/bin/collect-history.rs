@@ -12,7 +12,7 @@ use s2_sdk::{
 };
 use s2_verification::history::{
     AppendLedger, client, fencing_token_client, initialize_tail, match_seq_num_client,
-    read_all_record_hashes, resolve_deferred,
+    read_all_record_hashes,
 };
 use std::env;
 use std::num::NonZeroU32;
@@ -194,7 +194,7 @@ async fn main() -> eyre::Result<()> {
     debug!(?ledger, "all clients finished");
 
     let num_deferred = ledger.deferred.len();
-    let resolved = match resolve_deferred(&stream_client, ledger.clone()).await {
+    let resolved = match ledger.resolve(&stream_client).await {
         Ok(resolved) => {
             info!(num_deferred, "resolved deferred appends");
             resolved
