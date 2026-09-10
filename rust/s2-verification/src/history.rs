@@ -183,9 +183,13 @@ impl AppendLedger {
     /// Read the whole stream and decide each deferred append against its contents, as described
     /// in [`AppendLedger::resolve_against`].
     ///
-    /// Must only be called once every client has finished, so that no operation in the history
-    /// can have observed a batch which becomes durable after this read, and only on the merged
-    /// ledger of all of them, so that every successful append is accounted for.
+    /// Must only be called once every client has finished, so that the read comes after the last
+    /// operation in the history has completed, and only on the merged ledger of all of them, so
+    /// that every successful append is accounted for.
+    ///
+    /// A deferred append may still become durable after this read; that cannot be ruled out.
+    /// It is fine, because no operation in the history follows the read to observe it, and the
+    /// checker cannot tell such an append apart from one that never happened.
     pub async fn resolve(&self, stream: &S2Stream) -> eyre::Result<Vec<LabeledEvent>> {
         if self.deferred.is_empty() {
             return Ok(Vec::new());
@@ -204,10 +208,11 @@ impl AppendLedger {
     /// - found at exactly one position, which no other deferred append could also occupy: the
     ///   append became durable there, so it finishes as `AppendSuccess { tail }`, which pins it
     ///   to a single linearization point;
-    /// - not found, and the stream has not been trimmed: nothing in the history can have
-    ///   observed it, since no client is still running, so it finishes as
-    ///   `AppendDefiniteFailure`. Should the request still commit afterwards, that is outside
-    ///   the recorded history;
+    /// - not found, and the stream has not been trimmed: it was not durable at this point, hence
+    ///   (records being durable for good) at no earlier point either, so no operation in the
+    ///   history can have observed it. It finishes as `AppendDefiniteFailure`. It may still
+    ///   become durable afterwards, but with no operation left to observe that, the history
+    ///   reads the same either way;
     /// - otherwise it is ambiguous and left as an `AppendIndefiniteFailure`.
     ///
     /// Both resolved outcomes are one of the two the checker would have had to consider for the
