@@ -9,6 +9,7 @@ use s2_sdk::{
     },
 };
 use serde::Serialize;
+use std::ops::Range;
 use std::sync::{Arc, atomic::AtomicU64};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
@@ -141,22 +142,37 @@ pub struct LabeledEvent {
 ///
 /// Its `Start` event has already been recorded in the history, and its `Finish` must stay
 /// pending until every client has stopped issuing operations. At that point it can either be
-/// flushed as an `AppendIndefiniteFailure` (see [`DeferredAppend::into_indefinite`]), or
-/// resolved against the stream's actual contents with [`resolve_deferred`].
+/// flushed as an `AppendIndefiniteFailure`, or resolved against the stream's actual contents
+/// with [`resolve_deferred`].
 #[derive(Debug, Clone)]
 pub struct DeferredAppend {
     finish: LabeledEvent,
     record_hashes: Vec<u64>,
+    match_seq_num: Option<u64>,
 }
 
-impl DeferredAppend {
-    /// The unresolved outcome: an `AppendIndefiniteFailure` finish event.
+/// What a client learned about its appends, needed to resolve the deferred ones.
+#[derive(Debug, Clone, Default)]
+pub struct AppendLedger {
+    /// Appends whose outcome is unknown.
+    pub deferred: Vec<DeferredAppend>,
+    /// Sequence number ranges occupied by appends known to have succeeded.
+    pub landed: Vec<Range<u64>>,
+}
+
+impl AppendLedger {
+    pub fn merge(&mut self, other: Self) {
+        self.deferred.extend(other.deferred);
+        self.landed.extend(other.landed);
+    }
+
+    /// The unresolved outcomes: an `AppendIndefiniteFailure` finish event per deferred append.
     ///
-    /// The checker must then consider the append as possibly durable at any point between its
+    /// The checker must then consider each append as possibly durable at any point between its
     /// start and the end of the history. The cost of checking grows exponentially with the
     /// number of such events, so prefer [`resolve_deferred`] whenever the stream can be read.
-    pub fn into_indefinite(self) -> LabeledEvent {
-        self.finish
+    pub fn into_indefinite(self) -> Vec<LabeledEvent> {
+        self.deferred.into_iter().map(|d| d.finish).collect()
     }
 }
 
@@ -166,75 +182,120 @@ impl DeferredAppend {
 /// [`resolve_deferred_against`] for how each outcome is decided.
 ///
 /// Must only be called once every client has finished, so that no operation in the history
-/// can have observed a batch which becomes durable after this read.
+/// can have observed a batch which becomes durable after this read, and `ledger` must be the
+/// merged ledger of all of them.
 pub async fn resolve_deferred(
     stream: &S2Stream,
-    deferred: Vec<DeferredAppend>,
+    ledger: AppendLedger,
 ) -> eyre::Result<Vec<LabeledEvent>> {
-    if deferred.is_empty() {
+    if ledger.deferred.is_empty() {
         return Ok(Vec::new());
     }
     let (tail, record_hashes) = read_all_record_hashes(stream).await?;
-    Ok(resolve_deferred_against(tail, &record_hashes, deferred))
+    Ok(resolve_deferred_against(
+        tail,
+        &record_hashes,
+        &ledger.landed,
+        ledger.deferred,
+    ))
 }
 
 /// Resolve deferred appends against the record hashes observed on the stream.
 ///
 /// `tail` is the stream's tail and `stream_hashes` the hash of every record up to it, so
 /// `stream_hashes[i]` is the record at sequence number `tail - stream_hashes.len() + i`.
+/// `landed` are the positions occupied by appends known to have succeeded, which a deferred
+/// append therefore cannot occupy.
 ///
-/// For each deferred append, its batch is searched for as a contiguous run of record hashes:
-/// - found at exactly one position: the append became durable there, so it finishes as
-///   `AppendSuccess { tail }`, which pins it to a single linearization point;
-/// - not found: it never became durable, and since no client is still running nothing can have
-///   observed it, so it finishes as `AppendDefiniteFailure`;
-/// - found at several positions (identical record bodies): ambiguous, so it is left as an
-///   `AppendIndefiniteFailure`.
+/// Each deferred append is searched for as a contiguous run of record hashes outside `landed`,
+/// at its `match_seq_num` if it had one:
+/// - found at exactly one position, which no other deferred append could also occupy: the
+///   append became durable there, so it finishes as `AppendSuccess { tail }`, which pins it to a
+///   single linearization point;
+/// - not found, and the stream has not been trimmed: it never became durable, and since no
+///   client is still running nothing can have observed it, so it finishes as
+///   `AppendDefiniteFailure`;
+/// - otherwise it is ambiguous and left as an `AppendIndefiniteFailure`.
 pub fn resolve_deferred_against(
     tail: u64,
     stream_hashes: &[u64],
+    landed: &[Range<u64>],
     deferred: Vec<DeferredAppend>,
 ) -> Vec<LabeledEvent> {
     let first_seq_num = tail - stream_hashes.len() as u64;
+    let mut free = vec![true; stream_hashes.len()];
+    for seq_num in landed.iter().flat_map(Clone::clone) {
+        if let Some(idx) = seq_num.checked_sub(first_seq_num)
+            && let Some(slot) = free.get_mut(idx as usize)
+        {
+            *slot = false;
+        }
+    }
+
+    // Indices at which each deferred append may have landed.
+    let candidates: Vec<Vec<usize>> = deferred
+        .iter()
+        .map(|d| {
+            let n = d.record_hashes.len();
+            let matches_at = |idx: &usize| {
+                stream_hashes.get(*idx..*idx + n) == Some(d.record_hashes.as_slice())
+                    && free[*idx..*idx + n].iter().all(|f| *f)
+            };
+            match d.match_seq_num {
+                Some(seq_num) => seq_num
+                    .checked_sub(first_seq_num)
+                    .map(|idx| idx as usize)
+                    .filter(matches_at)
+                    .into_iter()
+                    .collect(),
+                None => (0..stream_hashes.len()).filter(matches_at).collect(),
+            }
+        })
+        .collect();
+
+    // Several deferred appends may match overlapping positions (e.g. repeated fence commands
+    // with identical bodies), in which case those positions cannot be attributed to any of them.
+    let mut claims = vec![0usize; stream_hashes.len()];
+    for (d, candidates) in deferred.iter().zip(&candidates) {
+        for idx in candidates {
+            for claim in &mut claims[*idx..*idx + d.record_hashes.len()] {
+                *claim += 1;
+            }
+        }
+    }
+
     deferred
         .into_iter()
-        .map(
-            |DeferredAppend {
-                 mut finish,
-                 record_hashes,
-             }| {
-                let mut positions = stream_hashes
-                    .windows(record_hashes.len())
-                    .enumerate()
-                    .filter(|(_, window)| *window == record_hashes.as_slice())
-                    .map(|(idx, _)| first_seq_num + idx as u64);
-                match (positions.next(), positions.next()) {
-                    (None, _) => {
-                        debug!(
-                            finish.client_id,
-                            finish.op_id, "deferred append never became durable"
-                        );
-                        finish.event = Event::Finish(CallFinish::AppendDefiniteFailure);
-                    }
-                    (Some(start), None) => {
-                        let tail = start + record_hashes.len() as u64;
-                        debug!(
-                            finish.client_id,
-                            finish.op_id, tail, "deferred append became durable"
-                        );
-                        finish.event = Event::Finish(CallFinish::AppendSuccess { tail });
-                    }
-                    (Some(_), Some(_)) => {
-                        warn!(
-                            finish.client_id,
-                            finish.op_id,
-                            "deferred append matches several positions, leaving indefinite"
-                        );
-                    }
+        .zip(candidates)
+        .map(|(mut d, candidates)| {
+            let n = d.record_hashes.len();
+            match candidates.as_slice() {
+                [] if first_seq_num == 0 => {
+                    debug!(
+                        d.finish.client_id,
+                        d.finish.op_id, "deferred append never became durable"
+                    );
+                    d.finish.event = Event::Finish(CallFinish::AppendDefiniteFailure);
                 }
-                finish
-            },
-        )
+                [idx] if claims[*idx..*idx + n].iter().all(|c| *c == 1) => {
+                    let tail = first_seq_num + (*idx + n) as u64;
+                    debug!(
+                        d.finish.client_id,
+                        d.finish.op_id, tail, "deferred append became durable"
+                    );
+                    d.finish.event = Event::Finish(CallFinish::AppendSuccess { tail });
+                }
+                _ => {
+                    warn!(
+                        d.finish.client_id,
+                        d.finish.op_id,
+                        num_candidates = candidates.len(),
+                        "deferred append cannot be located on the stream, leaving indefinite"
+                    );
+                }
+            }
+            d.finish
+        })
         .collect()
 }
 
@@ -247,22 +308,12 @@ fn random_op() -> Op {
     }
 }
 
-/// Handle an indefinite failure by deferring the event and attempting to rotate to a new client ID.
+/// Handle an indefinite failure by attempting to rotate to a new client ID, as the old one can
+/// no longer be used. The finish event itself has been deferred by [`append`].
 ///
 /// Returns `Some(new_client_id)` if a new client ID was successfully acquired,
 /// or `None` if the maximum number of client IDs has been reached (caller should break).
-async fn handle_indefinite_failure(
-    fin: &LabeledEvent,
-    record_hashes: Vec<u64>,
-    deferred: &mut Vec<DeferredAppend>,
-    client_id_atomic: &Arc<AtomicU64>,
-) -> Option<u64> {
-    // Call failed indefinitely, so we hold on to the finish log, and also assume a new
-    // client identity, as the old one can no longer be used.
-    deferred.push(DeferredAppend {
-        finish: fin.clone(),
-        record_hashes,
-    });
+async fn handle_indefinite_failure(client_id_atomic: &Arc<AtomicU64>) -> Option<u64> {
     tokio::time::sleep(INDEFINITE_FAILURE_BACKOFF).await;
     let client_id_candidate = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if client_id_candidate < MAX_CLIENT_IDS {
@@ -282,20 +333,21 @@ async fn handle_indefinite_failure(
 /// stream's fencing token. This append will use a `matchSeqNum` to avoid a simple last-write-win
 /// situation.
 ///
-/// Returns the deferred appends, whose finish was not communicated via `history_tx`.
+/// Returns the ledger of appends, including the deferred ones whose finish was not
+/// communicated via `history_tx`.
 pub async fn fencing_token_client(
     num_ops: usize,
     stream: S2Stream,
     client_id_atomic: Arc<AtomicU64>,
     op_id_atomic: Arc<AtomicU64>,
     history_tx: UnboundedSender<LabeledEvent>,
-) -> eyre::Result<Vec<DeferredAppend>> {
+) -> eyre::Result<AppendLedger> {
     const ATTEMPT_TO_SET_FENCE_TOKEN_EVERY: usize = 100;
 
     let mut client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let my_token = FencingToken::generate(6)?;
     debug!(?my_token);
-    let mut deferred = Vec::new();
+    let mut ledger = AppendLedger::default();
     let mut expected_next_seq_num = 0;
     'samples: for sample in 0..num_ops {
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -315,18 +367,13 @@ pub async fn fencing_token_client(
                 None,
                 Some(my_token.to_string()),
                 vec![token_xxh3],
+                &mut ledger,
             )
             .await?;
             match fin.event {
                 Event::Finish(CallFinish::AppendDefiniteFailure) => {}
                 Event::Finish(CallFinish::AppendIndefiniteFailure) => {
-                    if let Some(new_client_id) = handle_indefinite_failure(
-                        &fin,
-                        vec![token_xxh3],
-                        &mut deferred,
-                        &client_id_atomic,
-                    )
-                    .await
+                    if let Some(new_client_id) = handle_indefinite_failure(&client_id_atomic).await
                     {
                         client_id = new_client_id;
                     } else {
@@ -355,17 +402,13 @@ pub async fn fencing_token_client(
                         None,
                         Some(my_token.clone()),
                         None,
-                        record_hashes.clone(),
+                        record_hashes,
+                        &mut ledger,
                     )
                     .await?;
                     if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
-                        if let Some(new_client_id) = handle_indefinite_failure(
-                            &fin,
-                            record_hashes,
-                            &mut deferred,
-                            &client_id_atomic,
-                        )
-                        .await
+                        if let Some(new_client_id) =
+                            handle_indefinite_failure(&client_id_atomic).await
                         {
                             client_id = new_client_id;
                         } else {
@@ -391,7 +434,7 @@ pub async fn fencing_token_client(
         }
     }
 
-    Ok(deferred)
+    Ok(ledger)
 }
 
 /// Run a client that randomly selects between ops.
@@ -399,16 +442,17 @@ pub async fn fencing_token_client(
 /// When append operations are attempted, this client will specify a `match_seq_num` value,
 /// based on the most recent guess from a prior call.
 ///
-/// Returns the deferred appends, whose finish was not communicated via `history_tx`.
+/// Returns the ledger of appends, including the deferred ones whose finish was not
+/// communicated via `history_tx`.
 pub async fn match_seq_num_client(
     num_ops: usize,
     stream: S2Stream,
     client_id_atomic: Arc<AtomicU64>,
     op_id_atomic: Arc<AtomicU64>,
     history_tx: UnboundedSender<LabeledEvent>,
-) -> eyre::Result<Vec<DeferredAppend>> {
+) -> eyre::Result<AppendLedger> {
     let mut client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut deferred = Vec::new();
+    let mut ledger = AppendLedger::default();
     let mut expected_next_seq_num = 0;
     'samples: for sample in 0..num_ops {
         debug!(?client_id, ?sample);
@@ -428,17 +472,12 @@ pub async fn match_seq_num_client(
                     Some(expected_next_seq_num),
                     None,
                     None,
-                    record_hashes.clone(),
+                    record_hashes,
+                    &mut ledger,
                 )
                 .await?;
                 if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
-                    if let Some(new_client_id) = handle_indefinite_failure(
-                        &fin,
-                        record_hashes,
-                        &mut deferred,
-                        &client_id_atomic,
-                    )
-                    .await
+                    if let Some(new_client_id) = handle_indefinite_failure(&client_id_atomic).await
                     {
                         client_id = new_client_id;
                     } else {
@@ -462,7 +501,7 @@ pub async fn match_seq_num_client(
         }
     }
 
-    Ok(deferred)
+    Ok(ledger)
 }
 
 /// Run a client that randomly selects between ops.
@@ -470,16 +509,17 @@ pub async fn match_seq_num_client(
 /// Appends are not gated by `match_seq_num` or fencing token. Fewer definite failures
 /// are expected, compared to the `match_seq_num_client` and `fencing_token_client`.
 ///
-/// Returns the deferred appends, whose finish was not communicated via `history_tx`.
+/// Returns the ledger of appends, including the deferred ones whose finish was not
+/// communicated via `history_tx`.
 pub async fn client(
     num_ops: usize,
     stream: S2Stream,
     client_id_atomic: Arc<AtomicU64>,
     op_id_atomic: Arc<AtomicU64>,
     history_tx: UnboundedSender<LabeledEvent>,
-) -> eyre::Result<Vec<DeferredAppend>> {
+) -> eyre::Result<AppendLedger> {
     let mut client_id = client_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut deferred = Vec::new();
+    let mut ledger = AppendLedger::default();
     'samples: for sample in 0..num_ops {
         debug!(?client_id, ?sample);
         let op_id = op_id_atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -498,17 +538,12 @@ pub async fn client(
                     None,
                     None,
                     None,
-                    record_hashes.clone(),
+                    record_hashes,
+                    &mut ledger,
                 )
                 .await?;
                 if let Event::Finish(CallFinish::AppendIndefiniteFailure) = fin.event {
-                    if let Some(new_client_id) = handle_indefinite_failure(
-                        &fin,
-                        record_hashes,
-                        &mut deferred,
-                        &client_id_atomic,
-                    )
-                    .await
+                    if let Some(new_client_id) = handle_indefinite_failure(&client_id_atomic).await
                     {
                         client_id = new_client_id;
                     } else {
@@ -525,7 +560,7 @@ pub async fn client(
         }
     }
 
-    Ok(deferred)
+    Ok(ledger)
 }
 
 #[tracing::instrument(level = Level::TRACE, skip_all)]
@@ -665,6 +700,7 @@ async fn append(
     set_fencing_token: Option<String>,
     // The xxh3 hash of each record body, in order (caller must compute since fields are private)
     record_hashes: Vec<u64>,
+    ledger: &mut AppendLedger,
 ) -> eyre::Result<LabeledEvent> {
     assert_eq!(
         record_hashes.len(),
@@ -674,7 +710,7 @@ async fn append(
 
     let start = CallStart::Append {
         num_records: records.len() as u64,
-        record_hashes,
+        record_hashes: record_hashes.clone(),
         set_fencing_token,
         fencing_token: fencing_token.as_ref().map(|t| t.to_string()),
         match_seq_num,
@@ -695,30 +731,36 @@ async fn append(
     let resp = stream.append(input).await;
     trace!(?resp, "append response");
     let finish = match resp {
-        Ok(ack) => CallFinish::AppendSuccess {
-            tail: ack.end.seq_num,
-        },
+        Ok(ack) => {
+            ledger.landed.push(ack.start.seq_num..ack.end.seq_num);
+            CallFinish::AppendSuccess {
+                tail: ack.end.seq_num,
+            }
+        }
         Err(e) if e.has_no_side_effects() => CallFinish::AppendDefiniteFailure,
         Err(_) => CallFinish::AppendIndefiniteFailure,
     };
+    let fin = LabeledEvent {
+        event: Event::Finish(finish.clone()),
+        client_id,
+        op_id,
+    };
 
     match finish {
-        CallFinish::AppendIndefiniteFailure => {}
+        CallFinish::AppendIndefiniteFailure => {
+            ledger.deferred.push(DeferredAppend {
+                finish: fin.clone(),
+                record_hashes,
+                match_seq_num,
+            });
+        }
         CallFinish::AppendDefiniteFailure | CallFinish::AppendSuccess { .. } => {
-            history_tx.send(LabeledEvent {
-                event: Event::Finish(finish.clone()),
-                client_id,
-                op_id,
-            })?;
+            history_tx.send(fin.clone())?;
         }
         _ => unreachable!(),
     }
 
-    Ok(LabeledEvent {
-        event: Event::Finish(finish),
-        client_id,
-        op_id,
-    })
+    Ok(fin)
 }
 
 /// Read the entire stream from the head, returning the tail and the xxh3
@@ -747,10 +789,19 @@ pub async fn read_all_record_hashes(stream: &S2Stream) -> eyre::Result<(u64, Vec
     let mut tail = 0;
     let mut record_hashes = Vec::new();
     while let Some(resp) = session.next().await {
-        let batch = resp.map_err(|e| eyre::eyre!(e))?;
-        for record in &batch.records {
-            record_hashes.push(xxh3_64(record.body.as_ref()));
-            tail = record.seq_num + 1;
+        match resp {
+            Ok(batch) => {
+                for record in &batch.records {
+                    record_hashes.push(xxh3_64(record.body.as_ref()));
+                    tail = record.seq_num + 1;
+                }
+            }
+            // A session that resumes after an interruption picks up at the next seq_num, which
+            // is reported as unwritten once every record has been read.
+            Err(ReadSessionError::Read(ReadError::ReadUnwritten(pos))) if pos.seq_num == tail => {
+                break;
+            }
+            Err(e) => return Err(eyre::eyre!(e)),
         }
     }
     Ok((tail, record_hashes))
@@ -808,39 +859,82 @@ mod tests {
         assert_eq!(h3, 0x732ee99abc5002ff);
     }
 
-    #[test]
-    fn resolve_deferred_appends_against_stream() {
-        let deferred = |op_id, record_hashes: Vec<u64>| DeferredAppend {
+    fn deferred(op_id: u64, record_hashes: Vec<u64>, match_seq_num: Option<u64>) -> DeferredAppend {
+        DeferredAppend {
             finish: LabeledEvent {
                 event: Event::Finish(CallFinish::AppendIndefiniteFailure),
                 client_id: 1,
                 op_id,
             },
             record_hashes,
-        };
-        // Records 0..=2 were trimmed; records 3..=9 remain.
-        let stream_hashes = [10, 11, 12, 13, 10, 11, 14];
-        let resolved = resolve_deferred_against(
-            10,
-            &stream_hashes,
-            vec![
-                deferred(0, vec![12, 13]),
-                deferred(1, vec![99]),
-                deferred(2, vec![10, 11]),
-                deferred(3, vec![14]),
-            ],
-        );
-        let outcomes: Vec<_> = resolved
+            match_seq_num,
+        }
+    }
+
+    fn outcomes(resolved: Vec<LabeledEvent>) -> Vec<(u64, Event)> {
+        resolved
             .into_iter()
             .map(|fin| (fin.op_id, fin.event))
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn resolve_deferred_appends_against_stream() {
+        let stream_hashes = [10, 11, 12, 13, 10, 11, 14, 15, 15];
+        let resolved = resolve_deferred_against(
+            9,
+            &stream_hashes,
+            // Records 4..=5 came from an append that is known to have succeeded.
+            std::slice::from_ref(&(4..6)),
+            vec![
+                // Unique match.
+                deferred(0, vec![12, 13], None),
+                // Not on the stream.
+                deferred(1, vec![99], None),
+                // Also matches at 4, but that position is occupied by a successful append.
+                deferred(2, vec![10, 11], None),
+                // match_seq_num pins where the batch can be, even though it occurs elsewhere.
+                deferred(3, vec![15], Some(8)),
+                deferred(4, vec![15], Some(6)),
+                // Two deferred appends with identical records contend for the same position.
+                deferred(5, vec![14], None),
+                deferred(6, vec![14], None),
+            ],
+        );
         assert!(matches!(
-            outcomes.as_slice(),
+            outcomes(resolved).as_slice(),
             [
-                (0, Event::Finish(CallFinish::AppendSuccess { tail: 7 })),
+                (0, Event::Finish(CallFinish::AppendSuccess { tail: 4 })),
                 (1, Event::Finish(CallFinish::AppendDefiniteFailure)),
+                (2, Event::Finish(CallFinish::AppendSuccess { tail: 2 })),
+                (3, Event::Finish(CallFinish::AppendSuccess { tail: 9 })),
+                (4, Event::Finish(CallFinish::AppendDefiniteFailure)),
+                (5, Event::Finish(CallFinish::AppendIndefiniteFailure)),
+                (6, Event::Finish(CallFinish::AppendIndefiniteFailure)),
+            ]
+        ));
+    }
+
+    #[test]
+    fn resolve_deferred_appends_against_trimmed_stream() {
+        // Records 0..=2 were trimmed; records 3..=5 remain.
+        let resolved = resolve_deferred_against(
+            6,
+            &[13, 14, 15],
+            &[],
+            vec![
+                deferred(0, vec![14, 15], None),
+                // Could have been trimmed away, so cannot be called a definite failure.
+                deferred(1, vec![99], None),
+                deferred(2, vec![99], Some(1)),
+            ],
+        );
+        assert!(matches!(
+            outcomes(resolved).as_slice(),
+            [
+                (0, Event::Finish(CallFinish::AppendSuccess { tail: 6 })),
+                (1, Event::Finish(CallFinish::AppendIndefiniteFailure)),
                 (2, Event::Finish(CallFinish::AppendIndefiniteFailure)),
-                (3, Event::Finish(CallFinish::AppendSuccess { tail: 10 })),
             ]
         ));
     }

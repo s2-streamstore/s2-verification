@@ -11,7 +11,7 @@ use s2_sdk::{
     },
 };
 use s2_verification::history::{
-    DeferredAppend, client, fencing_token_client, initialize_tail, match_seq_num_client,
+    AppendLedger, client, fencing_token_client, initialize_tail, match_seq_num_client,
     read_all_record_hashes, resolve_deferred,
 };
 use std::env;
@@ -112,7 +112,10 @@ async fn main() -> eyre::Result<()> {
     // also the actual records' contents.
     let (tail, record_hashes) = read_all_record_hashes(&stream_client).await?;
 
+    let mut ledger = AppendLedger::default();
     if tail > 0 {
+        // The starter append occupies every record that already existed.
+        ledger.landed.push(0..tail);
         info!("stream is not empty, inserting a starter append event to rectify");
         initialize_tail(
             history_tx.clone(),
@@ -158,7 +161,7 @@ async fn main() -> eyre::Result<()> {
         let stream_client = s2.basin(basin.clone()).stream(stream.clone());
 
         let fut: std::pin::Pin<
-            Box<dyn std::future::Future<Output = eyre::Result<Vec<DeferredAppend>>> + Send>,
+            Box<dyn std::future::Future<Output = eyre::Result<AppendLedger>> + Send>,
         > = match workflow {
             Workflow::Regular => Box::pin(client(
                 num_ops_per_client,
@@ -185,30 +188,24 @@ async fn main() -> eyre::Result<()> {
 
         futs.push(fut);
     }
-    let deferred = futs
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<eyre::Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    debug!(?deferred, "all clients finished");
+    for client_ledger in futs.collect::<Vec<_>>().await {
+        ledger.merge(client_ledger?);
+    }
+    debug!(?ledger, "all clients finished");
 
-    let resolved = match resolve_deferred(&stream_client, deferred.clone()).await {
+    let num_deferred = ledger.deferred.len();
+    let resolved = match resolve_deferred(&stream_client, ledger.clone()).await {
         Ok(resolved) => {
-            info!(num_deferred = resolved.len(), "resolved deferred appends");
+            info!(num_deferred, "resolved deferred appends");
             resolved
         }
         Err(err) => {
             warn!(
                 ?err,
+                num_deferred,
                 "could not read stream to resolve deferred appends, leaving indefinite"
             );
-            deferred
-                .into_iter()
-                .map(DeferredAppend::into_indefinite)
-                .collect()
+            ledger.into_indefinite()
         }
     };
     for fin in resolved {
