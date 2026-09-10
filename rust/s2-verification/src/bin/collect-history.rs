@@ -11,8 +11,8 @@ use s2_sdk::{
     },
 };
 use s2_verification::history::{
-    CallFinish, Event, LabeledEvent, client, fencing_token_client, initialize_tail,
-    match_seq_num_client, read_all_record_hashes,
+    DeferredAppend, client, fencing_token_client, initialize_tail, match_seq_num_client,
+    read_all_record_hashes, resolve_deferred,
 };
 use std::env;
 use std::num::NonZeroU32;
@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -158,7 +158,7 @@ async fn main() -> eyre::Result<()> {
         let stream_client = s2.basin(basin.clone()).stream(stream.clone());
 
         let fut: std::pin::Pin<
-            Box<dyn std::future::Future<Output = eyre::Result<Vec<LabeledEvent>>> + Send>,
+            Box<dyn std::future::Future<Output = eyre::Result<Vec<DeferredAppend>>> + Send>,
         > = match workflow {
             Workflow::Regular => Box::pin(client(
                 num_ops_per_client,
@@ -185,17 +185,34 @@ async fn main() -> eyre::Result<()> {
 
         futs.push(fut);
     }
-    let deferred = futs.collect::<Vec<_>>().await;
+    let deferred = futs
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<eyre::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     debug!(?deferred, "all clients finished");
 
-    for result in deferred {
-        for fin in result? {
-            assert!(matches!(
-                fin.event,
-                Event::Finish(CallFinish::AppendIndefiniteFailure)
-            ));
-            history_tx.send(fin)?;
+    let resolved = match resolve_deferred(&stream_client, deferred.clone()).await {
+        Ok(resolved) => {
+            info!(num_deferred = resolved.len(), "resolved deferred appends");
+            resolved
         }
+        Err(err) => {
+            warn!(
+                ?err,
+                "could not read stream to resolve deferred appends, leaving indefinite"
+            );
+            deferred
+                .into_iter()
+                .map(DeferredAppend::into_indefinite)
+                .collect()
+        }
+    };
+    for fin in resolved {
+        history_tx.send(fin)?;
     }
 
     // tx drop signals to the writer task that it can stop
