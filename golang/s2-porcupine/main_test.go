@@ -489,10 +489,7 @@ func TestResolveIndefiniteAppends(t *testing.T) {
 	h.add(t, 4, 3, readStart())
 	h.add(t, 4, 3, finalReadSuccess([]uint64{1, 2, 3}))
 
-	records, res, err := resolveIndefiniteAppends(h.records(t))
-	if err != nil {
-		t.Fatalf("resolveIndefiniteAppends: %v", err)
-	}
+	records, res := resolveIndefiniteAppends(h.records(t))
 	if res != (Resolution{Applied: 1, NotApplied: 1}) {
 		t.Fatalf("unexpected resolution: %+v", res)
 	}
@@ -520,10 +517,7 @@ func TestResolveLeavesSharedRecordsIndefinite(t *testing.T) {
 	h.add(t, 3, 2, readStart())
 	h.add(t, 3, 2, finalReadSuccess([]uint64{7}))
 
-	records, res, err := resolveIndefiniteAppends(h.records(t))
-	if err != nil {
-		t.Fatalf("resolveIndefiniteAppends: %v", err)
-	}
+	records, res := resolveIndefiniteAppends(h.records(t))
 	if res != (Resolution{Unresolved: 1}) {
 		t.Fatalf("unexpected resolution: %+v", res)
 	}
@@ -546,10 +540,7 @@ func TestResolveDropsAbsentAppendWithSharedRecords(t *testing.T) {
 	h.add(t, 3, 2, readStart())
 	h.add(t, 3, 2, finalReadSuccess([]uint64{7}))
 
-	records, res, err := resolveIndefiniteAppends(h.records(t))
-	if err != nil {
-		t.Fatalf("resolveIndefiniteAppends: %v", err)
-	}
+	records, res := resolveIndefiniteAppends(h.records(t))
 	if res != (Resolution{NotApplied: 1}) {
 		t.Fatalf("unexpected resolution: %+v", res)
 	}
@@ -567,10 +558,7 @@ func TestResolvePartialAppendStillFailsCheck(t *testing.T) {
 	h.add(t, 2, 1, readStart())
 	h.add(t, 2, 1, finalReadSuccess([]uint64{3}))
 
-	records, res, err := resolveIndefiniteAppends(h.records(t))
-	if err != nil {
-		t.Fatalf("resolveIndefiniteAppends: %v", err)
-	}
+	records, res := resolveIndefiniteAppends(h.records(t))
 	if res != (Resolution{NotApplied: 1}) {
 		t.Fatalf("unexpected resolution: %+v", res)
 	}
@@ -591,10 +579,7 @@ func TestResolvedAppendIsStillChecked(t *testing.T) {
 	h.add(t, 3, 2, readStart())
 	h.add(t, 3, 2, finalReadSuccess([]uint64{100, 200}))
 
-	records, res, err := resolveIndefiniteAppends(h.records(t))
-	if err != nil {
-		t.Fatalf("resolveIndefiniteAppends: %v", err)
-	}
+	records, res := resolveIndefiniteAppends(h.records(t))
 	if res != (Resolution{Applied: 1}) {
 		t.Fatalf("unexpected resolution: %+v", res)
 	}
@@ -603,19 +588,27 @@ func TestResolvedAppendIsStillChecked(t *testing.T) {
 	}
 }
 
-func TestResolveRequiresFinalReadToBeLast(t *testing.T) {
+func TestResolveSkipsFinalReadThatOverlapsAnotherOp(t *testing.T) {
+	// Still a valid history: the read is checked like any other.
 	var h historyBuilder
 	h.add(t, 1, 0, appendStart([]uint64{1}, nil, nil))
 	h.add(t, 2, 1, readStart())
 	h.add(t, 1, 0, indefinite())
 	h.add(t, 2, 1, finalReadSuccess([]uint64{1}))
 
-	if _, _, err := resolveIndefiniteAppends(h.records(t)); err == nil {
-		t.Fatal("expected an error for a final read that overlaps another op")
+	input := h.records(t)
+	records, res := resolveIndefiniteAppends(input)
+	if res.Skipped == "" || res.Unresolved != 1 || len(records) != len(input) {
+		t.Fatalf("expected resolution to be skipped, got %+v with %d records", res, len(records))
+	}
+	if result := checkRecords(t, records); result != porcupine.Ok {
+		t.Fatalf("expected linearizable, got %v", result)
 	}
 }
 
-func TestResolveRejectsInconsistentFinalRead(t *testing.T) {
+func TestResolveSkipsInconsistentFinalRead(t *testing.T) {
+	// The read's record hashes don't match its tail, so they can't be trusted
+	// to settle anything. The model then judges the read itself.
 	var h historyBuilder
 	h.add(t, 1, 0, appendStart([]uint64{1}, nil, nil))
 	h.add(t, 1, 0, indefinite())
@@ -626,8 +619,13 @@ func TestResolveRejectsInconsistentFinalRead(t *testing.T) {
 		"record_hashes": []uint64{1},
 	}}})
 
-	if _, _, err := resolveIndefiniteAppends(h.records(t)); err == nil {
-		t.Fatal("expected an error for record hashes that do not match the tail")
+	input := h.records(t)
+	records, res := resolveIndefiniteAppends(input)
+	if res.Skipped == "" || len(records) != len(input) {
+		t.Fatalf("expected resolution to be skipped, got %+v with %d records", res, len(records))
+	}
+	if result := checkRecords(t, records); result != porcupine.Illegal {
+		t.Fatalf("expected not linearizable, got %v", result)
 	}
 }
 
@@ -639,10 +637,7 @@ func TestResolveWithoutFinalReadLeavesHistoryUnchanged(t *testing.T) {
 	h.add(t, 2, 1, readSuccess([]uint64{1}))
 
 	input := h.records(t)
-	records, res, err := resolveIndefiniteAppends(input)
-	if err != nil {
-		t.Fatalf("resolveIndefiniteAppends: %v", err)
-	}
+	records, res := resolveIndefiniteAppends(input)
 	if res != (Resolution{Unresolved: 1}) || len(records) != len(input) {
 		t.Fatalf("expected the history unchanged, got %+v with %d records", res, len(records))
 	}
@@ -672,10 +667,7 @@ func TestResolveKeepsManyIndefiniteAppendsTractable(t *testing.T) {
 	h.add(t, 101, 2*n+1, readStart())
 	h.add(t, 101, 2*n+1, finalReadSuccess(stream))
 
-	records, res, err := resolveIndefiniteAppends(h.records(t))
-	if err != nil {
-		t.Fatalf("resolveIndefiniteAppends: %v", err)
-	}
+	records, res := resolveIndefiniteAppends(h.records(t))
 	if res != (Resolution{Applied: n / 2, NotApplied: n / 2}) {
 		t.Fatalf("unexpected resolution: %+v", res)
 	}

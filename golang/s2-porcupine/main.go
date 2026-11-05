@@ -554,6 +554,8 @@ type Resolution struct {
 	Applied    int
 	NotApplied int
 	Unresolved int
+	// Why a final read was found but not used, if it wasn't.
+	Skipped string
 }
 
 // resolveIndefiniteAppends settles indefinite appends using the history's
@@ -575,8 +577,10 @@ type Resolution struct {
 //
 // Each rewrite narrows what the model would otherwise accept, and the final
 // read stays in the history, so the checker still verifies the resolved appends
-// against it.
-func resolveIndefiniteAppends(records []Record) ([]Record, Resolution, error) {
+// against it. A final read that can't be used for this, because it overlaps
+// another op or contradicts itself, leaves the history unchanged: it is still an
+// ordinary read for the model to check.
+func resolveIndefiniteAppends(records []Record) ([]Record, Resolution) {
 	var res Resolution
 	for _, rec := range records {
 		if rec.Event.Finish != nil && rec.Event.Finish.AppendIndefiniteFailure {
@@ -591,7 +595,7 @@ func resolveIndefiniteAppends(records []Record) ([]Record, Resolution, error) {
 		}
 	}
 	if finalIdx < 0 || res.Unresolved == 0 {
-		return records, res, nil
+		return records, res
 	}
 
 	final := records[finalIdx]
@@ -604,15 +608,18 @@ func resolveIndefiniteAppends(records []Record) ([]Record, Resolution, error) {
 		}
 	}
 	if finalStart < 0 {
-		return nil, res, fmt.Errorf("final read (op %d) has no start event", final.OpID)
+		res.Skipped = fmt.Sprintf("final read (op %d) has no start event", final.OpID)
+		return records, res
 	}
 	for _, rec := range records[finalStart:] {
 		if rec.OpID != final.OpID {
-			return nil, res, fmt.Errorf("final read (op %d) must start after every other op has finished, but op %d has an event after its start", final.OpID, rec.OpID)
+			res.Skipped = fmt.Sprintf("final read (op %d) does not start after every other op has finished: op %d has an event after its start", final.OpID, rec.OpID)
+			return records, res
 		}
 	}
 	if uint64(len(finalRead.RecordHashes)) != finalRead.Tail || foldRecordHashes(0, finalRead.RecordHashes) != finalRead.StreamHash {
-		return nil, res, fmt.Errorf("final read (op %d) record hashes do not match its tail and stream hash", final.OpID)
+		res.Skipped = fmt.Sprintf("final read (op %d) record hashes do not match its tail and stream hash", final.OpID)
+		return records, res
 	}
 
 	positions := make(map[uint64][]uint64)
@@ -683,7 +690,7 @@ func resolveIndefiniteAppends(records []Record) ([]Record, Resolution, error) {
 	res.Applied = len(applied)
 	res.NotApplied = len(notApplied)
 	res.Unresolved -= res.Applied + res.NotApplied
-	return resolved, res, nil
+	return resolved, res
 }
 
 func eventsFromRecords(records []Record) []porcupine.Event {
@@ -713,10 +720,7 @@ func eventsFromReader(r io.Reader) ([]porcupine.Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	records, _, err = resolveIndefiniteAppends(records)
-	if err != nil {
-		return nil, err
-	}
+	records, _ = resolveIndefiniteAppends(records)
 	return eventsFromRecords(records), nil
 }
 
@@ -759,10 +763,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "failed to decode history: %v\n", err)
 		os.Exit(1)
 	}
-	records, resolution, err := resolveIndefiniteAppends(records)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to resolve indefinite appends: %v\n", err)
-		os.Exit(1)
+	records, resolution := resolveIndefiniteAppends(records)
+	if resolution.Skipped != "" {
+		log.Warn("final read not used to settle indefinite appends", "reason", resolution.Skipped)
 	}
 	log.Info("indefinite appends", "applied", resolution.Applied, "not_applied", resolution.NotApplied, "unresolved", resolution.Unresolved)
 	events := eventsFromRecords(records)
