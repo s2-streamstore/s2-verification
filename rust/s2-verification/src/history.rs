@@ -32,6 +32,13 @@ const INDEFINITE_FAILURE_BACKOFF: Duration = Duration::from_millis(1000);
 /// harder it is to verify linearizability in a reasonable amount of time.
 const MAX_CLIENT_IDS: u64 = 20;
 
+/// Attempts for [`final_read`], which runs after the workload, possibly while
+/// faults are still being injected.
+const FINAL_READ_ATTEMPTS: usize = 10;
+const FINAL_READ_BACKOFF: Duration = Duration::from_secs(1);
+/// Bounds [`final_read`] overall, whatever retry budget the caller's client has.
+const FINAL_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Fold one record-body hash into a cumulative stream hash.
 ///
 /// The cumulative hash over a stream is defined as the left fold of this
@@ -114,6 +121,11 @@ pub enum CallFinish {
         /// Cumulative [`chain_hash`] over every record body observed from the
         /// head of the stream (seq_num 0) through the tail.
         stream_hash: u64,
+        /// xxh3 of every record body from the head through the tail. Only
+        /// logged by [`final_read`], for the checker to settle indefinite
+        /// appends.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        record_hashes: Option<Vec<u64>>,
     },
 }
 
@@ -436,7 +448,11 @@ async fn resolve_read_tail(
             }
         }
     }
-    Ok(CallFinish::ReadSuccess { tail, stream_hash })
+    Ok(CallFinish::ReadSuccess {
+        tail,
+        stream_hash,
+        record_hashes: None,
+    })
 }
 
 #[tracing::instrument(level = Level::TRACE, skip(history_tx, stream))]
@@ -476,6 +492,7 @@ async fn read_session(
             CallFinish::ReadSuccess {
                 tail: 0,
                 stream_hash: 0,
+                record_hashes: None,
             }
         }
         Err(_e) => {
@@ -634,6 +651,59 @@ pub async fn read_all_record_hashes(stream: &S2Stream) -> eyre::Result<(u64, Vec
     Ok((tail, record_hashes))
 }
 
+/// Read the whole stream once every client has finished, and log it as a read
+/// that also carries the hash of every record.
+///
+/// The checker uses this read to settle indefinite appends: one whose records
+/// are on the stream took effect, and one whose records are not never did.
+/// Call it after sending the deferred events, so the read starts after every
+/// other op in the history has finished.
+pub async fn final_read(
+    history_tx: UnboundedSender<LabeledEvent>,
+    stream: &S2Stream,
+    client_id: u64,
+    op_id: u64,
+) -> eyre::Result<()> {
+    history_tx.send(LabeledEvent {
+        event: Event::Start(CallStart::Read),
+        client_id,
+        op_id,
+    })?;
+
+    // A read has no side effects, so retrying within the one logged op is safe.
+    let read = async {
+        for attempt in 1..=FINAL_READ_ATTEMPTS {
+            match read_all_record_hashes(stream).await {
+                Ok((tail, record_hashes)) => {
+                    return CallFinish::ReadSuccess {
+                        tail,
+                        stream_hash: record_hashes.iter().fold(0, |h, &r| chain_hash(h, r)),
+                        record_hashes: Some(record_hashes),
+                    };
+                }
+                Err(e) => {
+                    warn!(?e, attempt, "final read failed");
+                    tokio::time::sleep(FINAL_READ_BACKOFF).await;
+                }
+            }
+        }
+        CallFinish::ReadFailure
+    };
+    let finish = tokio::time::timeout(FINAL_READ_TIMEOUT, read)
+        .await
+        .unwrap_or_else(|_| {
+            warn!("final read timed out");
+            CallFinish::ReadFailure
+        });
+
+    history_tx.send(LabeledEvent {
+        event: Event::Finish(finish),
+        client_id,
+        op_id,
+    })?;
+    Ok(())
+}
+
 /// Since the linearizability model expects a stream's tail
 /// to start at 0, this fn allows us to "correct" the initial state
 /// for any non-empty stream, by spoofing a successful append from 0
@@ -691,8 +761,23 @@ mod tests {
         let json = serde_json::to_string(&CallFinish::ReadSuccess {
             tail: 7,
             stream_hash: 42,
+            record_hashes: None,
         })
         .expect("serialize read success");
         assert_eq!(json, r#"{"ReadSuccess":{"tail":7,"stream_hash":42}}"#);
+    }
+
+    #[test]
+    fn final_read_success_serializes_record_hashes() {
+        let json = serde_json::to_string(&CallFinish::ReadSuccess {
+            tail: 2,
+            stream_hash: 42,
+            record_hashes: Some(vec![1, 2]),
+        })
+        .expect("serialize read success");
+        assert_eq!(
+            json,
+            r#"{"ReadSuccess":{"tail":2,"stream_hash":42,"record_hashes":[1,2]}}"#
+        );
     }
 }

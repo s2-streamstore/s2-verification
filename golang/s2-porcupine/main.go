@@ -76,6 +76,9 @@ type AppendSuccessResult struct {
 type ReadSuccessResult struct {
 	Tail       uint64 `json:"tail"`
 	StreamHash uint64 `json:"stream_hash"`
+	// Hash of every record from the head through the tail. Only present on the
+	// collector's final read; see resolveIndefiniteAppends.
+	RecordHashes []uint64 `json:"record_hashes,omitempty"`
 }
 
 type CheckTailSuccessResult struct {
@@ -526,40 +529,199 @@ func Ptr[T any](v T) *T {
 	return &v
 }
 
-func eventsFromReader(r io.Reader) ([]porcupine.Event, error) {
+func recordsFromReader(r io.Reader) ([]Record, error) {
 	decoder := json.NewDecoder(r)
-	var events []porcupine.Event
+	var records []Record
 
 	for {
 		var record Record
 		if err := decoder.Decode(&record); err != nil {
 			if err == io.EOF {
-				return events, nil
+				return records, nil
 			}
 			return nil, fmt.Errorf("decode record at byte offset %d: %w", decoder.InputOffset(), err)
 		}
-
-		switch {
-		case record.Event.Start != nil:
-			input := inputFromStart(record.Event.Start)
-			events = append(events, porcupine.Event{
-				Kind:     porcupine.CallEvent,
-				Value:    input,
-				Id:       record.OpID,
-				ClientId: record.ClientID,
-			})
-		case record.Event.Finish != nil:
-			output := outputFromFinish(record.Event.Finish)
-			events = append(events, porcupine.Event{
-				Kind:     porcupine.ReturnEvent,
-				Value:    output,
-				Id:       record.OpID,
-				ClientId: record.ClientID,
-			})
-		default:
+		if record.Event.Start == nil && record.Event.Finish == nil {
 			return nil, fmt.Errorf("record at byte offset %d has neither Start nor Finish event", decoder.InputOffset())
 		}
+		records = append(records, record)
 	}
+}
+
+// Resolution counts the history's indefinite appends by how the final read
+// settled them.
+type Resolution struct {
+	Applied    int
+	NotApplied int
+	Unresolved int
+	// Why a final read was found but not used, if it wasn't.
+	Skipped string
+}
+
+// resolveIndefiniteAppends settles indefinite appends using the history's
+// final read, if it has one.
+//
+// An indefinite append stays open until the end of the history, so the checker
+// has to consider every subset of them having taken effect at every point after
+// they started, which is exponential in their number. The final read starts
+// after every other op has finished and reports the hash of every record on the
+// stream, which settles most of them:
+//   - any of its records is missing from the stream: it did not take effect,
+//     since an append puts all of its records on the stream, so it is dropped;
+//   - its records belong to no other append and appear exactly once,
+//     contiguously: it took effect there, so it becomes a success whose tail
+//     is the end of its records.
+//
+// Anything else (records shared with another append, or found more than once
+// or out of order) stays indefinite for the model to judge.
+//
+// Each rewrite narrows what the model would otherwise accept, and the final
+// read stays in the history, so the checker still verifies the resolved appends
+// against it. A final read that can't be used for this, because it overlaps
+// another op or contradicts itself, leaves the history unchanged: it is still an
+// ordinary read for the model to check.
+func resolveIndefiniteAppends(records []Record) ([]Record, Resolution) {
+	var res Resolution
+	for _, rec := range records {
+		if rec.Event.Finish != nil && rec.Event.Finish.AppendIndefiniteFailure {
+			res.Unresolved++
+		}
+	}
+
+	finalIdx := -1
+	for i, rec := range records {
+		if rec.Event.Finish != nil && rec.Event.Finish.ReadSuccess != nil && rec.Event.Finish.ReadSuccess.RecordHashes != nil {
+			finalIdx = i
+		}
+	}
+	if finalIdx < 0 || res.Unresolved == 0 {
+		return records, res
+	}
+
+	final := records[finalIdx]
+	finalRead := final.Event.Finish.ReadSuccess
+	finalStart := -1
+	for i, rec := range records {
+		if rec.OpID == final.OpID && rec.Event.Start != nil {
+			finalStart = i
+			break
+		}
+	}
+	if finalStart < 0 {
+		res.Skipped = fmt.Sprintf("final read (op %d) has no start event", final.OpID)
+		return records, res
+	}
+	for _, rec := range records[finalStart:] {
+		if rec.OpID != final.OpID {
+			res.Skipped = fmt.Sprintf("final read (op %d) does not start after every other op has finished: op %d has an event after its start", final.OpID, rec.OpID)
+			return records, res
+		}
+	}
+	if uint64(len(finalRead.RecordHashes)) != finalRead.Tail || foldRecordHashes(0, finalRead.RecordHashes) != finalRead.StreamHash {
+		res.Skipped = fmt.Sprintf("final read (op %d) record hashes do not match its tail and stream hash", final.OpID)
+		return records, res
+	}
+
+	positions := make(map[uint64][]uint64)
+	for pos, h := range finalRead.RecordHashes {
+		positions[h] = append(positions[h], uint64(pos))
+	}
+	owners := make(map[uint64]int)
+	appends := make(map[int]*AppendArgs)
+	for _, rec := range records {
+		if rec.Event.Start != nil && rec.Event.Start.Append != nil {
+			appends[rec.OpID] = rec.Event.Start.Append
+			for _, h := range rec.Event.Start.Append.RecordHashes {
+				owners[h]++
+			}
+		}
+	}
+
+	applied := make(map[int]uint64)
+	notApplied := make(map[int]bool)
+	for _, rec := range records {
+		if rec.Event.Finish == nil || !rec.Event.Finish.AppendIndefiniteFailure {
+			continue
+		}
+		args, ok := appends[rec.OpID]
+		if !ok || len(args.RecordHashes) == 0 {
+			continue
+		}
+		unique, missing := true, false
+		for _, h := range args.RecordHashes {
+			if owners[h] != 1 {
+				unique = false
+			}
+			if len(positions[h]) == 0 {
+				missing = true
+			}
+		}
+		if missing {
+			// Had it taken effect, every one of its records would be on the stream.
+			notApplied[rec.OpID] = true
+			continue
+		}
+		if !unique {
+			continue
+		}
+		first := positions[args.RecordHashes[0]]
+		contiguous := len(first) == 1
+		for k, h := range args.RecordHashes {
+			if !contiguous {
+				break
+			}
+			contiguous = len(positions[h]) == 1 && positions[h][0] == first[0]+uint64(k)
+		}
+		if contiguous {
+			applied[rec.OpID] = first[0] + uint64(len(args.RecordHashes))
+		}
+	}
+
+	resolved := make([]Record, 0, len(records))
+	for _, rec := range records {
+		if notApplied[rec.OpID] {
+			continue
+		}
+		if tail, ok := applied[rec.OpID]; ok && rec.Event.Finish != nil {
+			rec.Event.Finish = &FinishEvent{AppendSuccess: &AppendSuccessResult{Tail: tail}}
+		}
+		resolved = append(resolved, rec)
+	}
+	res.Applied = len(applied)
+	res.NotApplied = len(notApplied)
+	res.Unresolved -= res.Applied + res.NotApplied
+	return resolved, res
+}
+
+func eventsFromRecords(records []Record) []porcupine.Event {
+	events := make([]porcupine.Event, 0, len(records))
+	for _, record := range records {
+		if record.Event.Start != nil {
+			events = append(events, porcupine.Event{
+				Kind:     porcupine.CallEvent,
+				Value:    inputFromStart(record.Event.Start),
+				Id:       record.OpID,
+				ClientId: record.ClientID,
+			})
+		} else {
+			events = append(events, porcupine.Event{
+				Kind:     porcupine.ReturnEvent,
+				Value:    outputFromFinish(record.Event.Finish),
+				Id:       record.OpID,
+				ClientId: record.ClientID,
+			})
+		}
+	}
+	return events
+}
+
+func eventsFromReader(r io.Reader) ([]porcupine.Event, error) {
+	records, err := recordsFromReader(r)
+	if err != nil {
+		return nil, err
+	}
+	records, _ = resolveIndefiniteAppends(records)
+	return eventsFromRecords(records), nil
 }
 
 // Version is set at build time via ldflags
@@ -596,11 +758,17 @@ func main() {
 		defer f.Close()
 	}
 
-	events, err := eventsFromReader(f)
+	records, err := recordsFromReader(f)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to decode history: %v\n", err)
 		os.Exit(1)
 	}
+	records, resolution := resolveIndefiniteAppends(records)
+	if resolution.Skipped != "" {
+		log.Warn("final read not used to settle indefinite appends", "reason", resolution.Skipped)
+	}
+	log.Info("indefinite appends", "applied", resolution.Applied, "not_applied", resolution.NotApplied, "unresolved", resolution.Unresolved)
+	events := eventsFromRecords(records)
 
 	model := s2Model.ToModel()
 	res, info := porcupine.CheckEventsVerbose(model, events, 0)
