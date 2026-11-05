@@ -36,6 +36,8 @@ const MAX_CLIENT_IDS: u64 = 20;
 /// faults are still being injected.
 const FINAL_READ_ATTEMPTS: usize = 10;
 const FINAL_READ_BACKOFF: Duration = Duration::from_secs(1);
+/// Bounds [`final_read`] overall, whatever retry budget the caller's client has.
+const FINAL_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Fold one record-body hash into a cumulative stream hash.
 ///
@@ -669,23 +671,30 @@ pub async fn final_read(
     })?;
 
     // A read has no side effects, so retrying within the one logged op is safe.
-    let mut finish = CallFinish::ReadFailure;
-    for attempt in 1..=FINAL_READ_ATTEMPTS {
-        match read_all_record_hashes(stream).await {
-            Ok((tail, record_hashes)) => {
-                finish = CallFinish::ReadSuccess {
-                    tail,
-                    stream_hash: record_hashes.iter().fold(0, |h, &r| chain_hash(h, r)),
-                    record_hashes: Some(record_hashes),
-                };
-                break;
-            }
-            Err(e) => {
-                warn!(?e, attempt, "final read failed");
-                tokio::time::sleep(FINAL_READ_BACKOFF).await;
+    let read = async {
+        for attempt in 1..=FINAL_READ_ATTEMPTS {
+            match read_all_record_hashes(stream).await {
+                Ok((tail, record_hashes)) => {
+                    return CallFinish::ReadSuccess {
+                        tail,
+                        stream_hash: record_hashes.iter().fold(0, |h, &r| chain_hash(h, r)),
+                        record_hashes: Some(record_hashes),
+                    };
+                }
+                Err(e) => {
+                    warn!(?e, attempt, "final read failed");
+                    tokio::time::sleep(FINAL_READ_BACKOFF).await;
+                }
             }
         }
-    }
+        CallFinish::ReadFailure
+    };
+    let finish = tokio::time::timeout(FINAL_READ_TIMEOUT, read)
+        .await
+        .unwrap_or_else(|_| {
+            warn!("final read timed out");
+            CallFinish::ReadFailure
+        });
 
     history_tx.send(LabeledEvent {
         event: Event::Finish(finish),
