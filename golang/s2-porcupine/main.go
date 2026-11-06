@@ -202,8 +202,10 @@ type StreamState struct {
 	// head through the tail. This single value commits to the entire stream
 	// contents, so the model state stays constant-size regardless of how many
 	// records have been appended.
-	StreamHash   uint64
-	FencingToken *string
+	StreamHash uint64
+	// S2 streams start with an empty fencing token, and an append that supplies
+	// a token is compared against it, so "" is a token like any other.
+	FencingToken string
 }
 
 type StreamInput struct {
@@ -246,20 +248,13 @@ func foldRecordHashes(streamHash uint64, recordHashes []uint64) uint64 {
 	return acc
 }
 
-func stringPtrEqual(a, b *string) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
-}
-
 var s2Model = porcupine.NondeterministicModel{
 	Init: func() []interface{} {
 		states := []interface{}{
 			StreamState{
 				Tail:         0,
 				StreamHash:   0,
-				FencingToken: nil,
+				FencingToken: "",
 			},
 		}
 		return states
@@ -272,11 +267,9 @@ var s2Model = porcupine.NondeterministicModel{
 		if inp.InputType == 0 {
 			// Append
 			// TODO also make sure a set token is a single record batch
-			var optimisticToken *string
+			optimisticToken := startingState.FencingToken
 			if inp.SetFencingToken != nil {
-				optimisticToken = inp.SetFencingToken
-			} else {
-				optimisticToken = startingState.FencingToken
+				optimisticToken = *inp.SetFencingToken
 			}
 			optimisticState := StreamState{
 				Tail:         startingState.Tail + *inp.NumRecords,
@@ -287,12 +280,10 @@ var s2Model = porcupine.NondeterministicModel{
 				// Did not become durable.
 				return []interface{}{startingState}
 			} else if out.Failure {
-				if inp.BatchFencingToken != nil {
-					if startingState.FencingToken == nil || *inp.BatchFencingToken != *startingState.FencingToken {
-						// A fencing token was supplied, but did not match the current token on the stream.
-						// This should not have become durable.
-						return []interface{}{startingState}
-					}
+				if inp.BatchFencingToken != nil && *inp.BatchFencingToken != startingState.FencingToken {
+					// A fencing token was supplied, but did not match the current token on the stream.
+					// This should not have become durable.
+					return []interface{}{startingState}
 				}
 				if inp.MatchSeqNum != nil && *inp.MatchSeqNum != startingState.Tail {
 					// A matchSeqNum position was supplied, but did not match the current tail of the stream.
@@ -303,11 +294,9 @@ var s2Model = porcupine.NondeterministicModel{
 				return []interface{}{optimisticState, startingState}
 			} else {
 				// Durable
-				if inp.BatchFencingToken != nil {
+				if inp.BatchFencingToken != nil && *inp.BatchFencingToken != startingState.FencingToken {
 					// Illegal
-					if startingState.FencingToken == nil || *startingState.FencingToken != *inp.BatchFencingToken {
-						return []interface{}{}
-					}
+					return []interface{}{}
 				}
 				if inp.MatchSeqNum != nil && *inp.MatchSeqNum != startingState.Tail {
 					// Illegal
@@ -339,7 +328,7 @@ var s2Model = porcupine.NondeterministicModel{
 	Equal: func(state1, state2 interface{}) bool {
 		st1 := state1.(StreamState)
 		st2 := state2.(StreamState)
-		return st1.Tail == st2.Tail && st1.StreamHash == st2.StreamHash && stringPtrEqual(st1.FencingToken, st2.FencingToken)
+		return st1.Tail == st2.Tail && st1.StreamHash == st2.StreamHash && st1.FencingToken == st2.FencingToken
 	},
 	DescribeOperation: func(input interface{}, output interface{}) string {
 		inp := input.(StreamInput)
@@ -355,11 +344,10 @@ var s2Model = porcupine.NondeterministicModel{
 	},
 	DescribeState: func(state interface{}) string {
 		st := state.(StreamState)
-		if st.FencingToken == nil {
+		if st.FencingToken == "" {
 			return fmt.Sprintf("tail[%d],hash[%d]", st.Tail, st.StreamHash)
-		} else {
-			return fmt.Sprintf("tail[%d],hash[%d],token[%s]", st.Tail, st.StreamHash, *st.FencingToken)
 		}
+		return fmt.Sprintf("tail[%d],hash[%d],token[%s]", st.Tail, st.StreamHash, st.FencingToken)
 	},
 }
 
