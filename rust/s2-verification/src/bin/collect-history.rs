@@ -11,7 +11,7 @@ use s2_sdk::{
     },
 };
 use s2_verification::history::{
-    CallFinish, Event, LabeledEvent, client, fencing_token_client, initialize_tail,
+    CallFinish, Event, LabeledEvent, client, fencing_token_client, final_read, initialize_tail,
     match_seq_num_client, read_all_record_hashes,
 };
 use std::env;
@@ -197,6 +197,14 @@ async fn main() -> eyre::Result<()> {
             history_tx.send(fin)?;
         }
     }
+
+    final_read(
+        history_tx.clone(),
+        &stream_client,
+        client_ids.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        op_ids.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .await?;
 
     // tx drop signals to the writer task that it can stop
     drop(history_tx);

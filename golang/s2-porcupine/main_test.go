@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anishathalye/porcupine"
 	"github.com/zeebo/xxh3"
@@ -397,5 +398,281 @@ func TestReadVerifiesWholeStream(t *testing.T) {
 
 	if result != porcupine.Ok {
 		t.Errorf("Expected linearizable events to pass, got result: %v", result)
+	}
+}
+
+type historyBuilder struct {
+	lines []string
+}
+
+func (b *historyBuilder) add(t *testing.T, clientID, opID int, event any) {
+	t.Helper()
+	line, err := json.Marshal(map[string]any{"event": event, "client_id": clientID, "op_id": opID})
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	b.lines = append(b.lines, string(line))
+}
+
+func (b *historyBuilder) records(t *testing.T) []Record {
+	t.Helper()
+	records, err := recordsFromReader(strings.NewReader(strings.Join(b.lines, "\n")))
+	if err != nil {
+		t.Fatalf("recordsFromReader: %v", err)
+	}
+	return records
+}
+
+func appendStart(recordHashes []uint64, setFencingToken, fencingToken *string) any {
+	return map[string]any{"Start": map[string]any{"Append": map[string]any{
+		"num_records":       len(recordHashes),
+		"record_hashes":     recordHashes,
+		"set_fencing_token": setFencingToken,
+		"fencing_token":     fencingToken,
+		"match_seq_num":     nil,
+	}}}
+}
+
+func appendSuccess(tail uint64) any {
+	return map[string]any{"Finish": map[string]any{"AppendSuccess": map[string]any{"tail": tail}}}
+}
+
+const appendIndefinite = `AppendIndefiniteFailure`
+
+func readStart() any {
+	return map[string]any{"Start": "Read"}
+}
+
+func readSuccess(recordHashes []uint64) any {
+	return map[string]any{"Finish": map[string]any{"ReadSuccess": map[string]any{
+		"tail":        len(recordHashes),
+		"stream_hash": foldRecordHashes(0, recordHashes),
+	}}}
+}
+
+func finalReadSuccess(recordHashes []uint64) any {
+	return map[string]any{"Finish": map[string]any{"ReadSuccess": map[string]any{
+		"tail":          len(recordHashes),
+		"stream_hash":   foldRecordHashes(0, recordHashes),
+		"record_hashes": recordHashes,
+	}}}
+}
+
+func indefinite() any {
+	return map[string]any{"Finish": appendIndefinite}
+}
+
+func checkRecords(t *testing.T, records []Record) porcupine.CheckResult {
+	t.Helper()
+	result, _ := porcupine.CheckEventsVerbose(s2Model.ToModel(), eventsFromRecords(records), 10*time.Second)
+	return result
+}
+
+func opFinish(records []Record, opID int) *FinishEvent {
+	for _, rec := range records {
+		if rec.OpID == opID && rec.Event.Finish != nil {
+			return rec.Event.Finish
+		}
+	}
+	return nil
+}
+
+func TestResolveIndefiniteAppends(t *testing.T) {
+	// Client 1's append succeeds. Clients 2 and 3 each append indefinitely, and
+	// only client 2's record reaches the stream.
+	var h historyBuilder
+	h.add(t, 1, 0, appendStart([]uint64{1, 2}, nil, nil))
+	h.add(t, 2, 1, appendStart([]uint64{3}, nil, nil))
+	h.add(t, 3, 2, appendStart([]uint64{4, 5}, nil, nil))
+	h.add(t, 1, 0, appendSuccess(2))
+	h.add(t, 2, 1, indefinite())
+	h.add(t, 3, 2, indefinite())
+	h.add(t, 4, 3, readStart())
+	h.add(t, 4, 3, finalReadSuccess([]uint64{1, 2, 3}))
+
+	records, res := resolveIndefiniteAppends(h.records(t))
+	if res != (Resolution{Applied: 1, NotApplied: 1}) {
+		t.Fatalf("unexpected resolution: %+v", res)
+	}
+	if fin := opFinish(records, 1); fin == nil || fin.AppendSuccess == nil || fin.AppendSuccess.Tail != 3 {
+		t.Fatalf("expected op 1 to resolve to a success with tail 3, got %+v", fin)
+	}
+	for _, rec := range records {
+		if rec.OpID == 2 {
+			t.Fatalf("expected op 2 to be dropped, found %+v", rec)
+		}
+	}
+	if result := checkRecords(t, records); result != porcupine.Ok {
+		t.Fatalf("expected linearizable, got %v", result)
+	}
+}
+
+func TestResolveLeavesSharedRecordsIndefinite(t *testing.T) {
+	// Both appends carry the same record, as repeated fence attempts with one
+	// token do, so the final read cannot tell which of them it observed.
+	var h historyBuilder
+	h.add(t, 1, 0, appendStart([]uint64{7}, nil, nil))
+	h.add(t, 1, 0, appendSuccess(1))
+	h.add(t, 2, 1, appendStart([]uint64{7}, nil, nil))
+	h.add(t, 2, 1, indefinite())
+	h.add(t, 3, 2, readStart())
+	h.add(t, 3, 2, finalReadSuccess([]uint64{7}))
+
+	records, res := resolveIndefiniteAppends(h.records(t))
+	if res != (Resolution{Unresolved: 1}) {
+		t.Fatalf("unexpected resolution: %+v", res)
+	}
+	if fin := opFinish(records, 1); fin == nil || !fin.AppendIndefiniteFailure {
+		t.Fatalf("expected op 1 to stay indefinite, got %+v", fin)
+	}
+	if result := checkRecords(t, records); result != porcupine.Ok {
+		t.Fatalf("expected linearizable, got %v", result)
+	}
+}
+
+func TestResolveDropsAbsentAppendWithSharedRecords(t *testing.T) {
+	// Record 7 also belongs to another append, but this append's record 8 is
+	// not on the stream, so it cannot have taken effect.
+	var h historyBuilder
+	h.add(t, 1, 0, appendStart([]uint64{7}, nil, nil))
+	h.add(t, 1, 0, appendSuccess(1))
+	h.add(t, 2, 1, appendStart([]uint64{8, 7}, nil, nil))
+	h.add(t, 2, 1, indefinite())
+	h.add(t, 3, 2, readStart())
+	h.add(t, 3, 2, finalReadSuccess([]uint64{7}))
+
+	records, res := resolveIndefiniteAppends(h.records(t))
+	if res != (Resolution{NotApplied: 1}) {
+		t.Fatalf("unexpected resolution: %+v", res)
+	}
+	if result := checkRecords(t, records); result != porcupine.Ok {
+		t.Fatalf("expected linearizable, got %v", result)
+	}
+}
+
+func TestResolvePartialAppendStillFailsCheck(t *testing.T) {
+	// Only part of the batch reached the stream. The append is dropped, which
+	// leaves record 3 on the final read unexplained, so the check must fail.
+	var h historyBuilder
+	h.add(t, 1, 0, appendStart([]uint64{3, 4}, nil, nil))
+	h.add(t, 1, 0, indefinite())
+	h.add(t, 2, 1, readStart())
+	h.add(t, 2, 1, finalReadSuccess([]uint64{3}))
+
+	records, res := resolveIndefiniteAppends(h.records(t))
+	if res != (Resolution{NotApplied: 1}) {
+		t.Fatalf("unexpected resolution: %+v", res)
+	}
+	if result := checkRecords(t, records); result != porcupine.Illegal {
+		t.Fatalf("expected not linearizable, got %v", result)
+	}
+}
+
+func TestResolvedAppendIsStillChecked(t *testing.T) {
+	// The stream is fenced with token "a", so an append carrying token "b"
+	// must not take effect. The final read shows that it did.
+	a, b := "a", "b"
+	var h historyBuilder
+	h.add(t, 1, 0, appendStart([]uint64{100}, &a, nil))
+	h.add(t, 1, 0, appendSuccess(1))
+	h.add(t, 2, 1, appendStart([]uint64{200}, nil, &b))
+	h.add(t, 2, 1, indefinite())
+	h.add(t, 3, 2, readStart())
+	h.add(t, 3, 2, finalReadSuccess([]uint64{100, 200}))
+
+	records, res := resolveIndefiniteAppends(h.records(t))
+	if res != (Resolution{Applied: 1}) {
+		t.Fatalf("unexpected resolution: %+v", res)
+	}
+	if result := checkRecords(t, records); result != porcupine.Illegal {
+		t.Fatalf("expected not linearizable, got %v", result)
+	}
+}
+
+func TestResolveSkipsFinalReadThatOverlapsAnotherOp(t *testing.T) {
+	// Still a valid history: the read is checked like any other.
+	var h historyBuilder
+	h.add(t, 1, 0, appendStart([]uint64{1}, nil, nil))
+	h.add(t, 2, 1, readStart())
+	h.add(t, 1, 0, indefinite())
+	h.add(t, 2, 1, finalReadSuccess([]uint64{1}))
+
+	input := h.records(t)
+	records, res := resolveIndefiniteAppends(input)
+	if res.Skipped == "" || res.Unresolved != 1 || len(records) != len(input) {
+		t.Fatalf("expected resolution to be skipped, got %+v with %d records", res, len(records))
+	}
+	if result := checkRecords(t, records); result != porcupine.Ok {
+		t.Fatalf("expected linearizable, got %v", result)
+	}
+}
+
+func TestResolveSkipsInconsistentFinalRead(t *testing.T) {
+	// The read's record hashes don't match its tail, so they can't be trusted
+	// to settle anything. The model then judges the read itself.
+	var h historyBuilder
+	h.add(t, 1, 0, appendStart([]uint64{1}, nil, nil))
+	h.add(t, 1, 0, indefinite())
+	h.add(t, 2, 1, readStart())
+	h.add(t, 2, 1, map[string]any{"Finish": map[string]any{"ReadSuccess": map[string]any{
+		"tail":          2,
+		"stream_hash":   foldRecordHashes(0, []uint64{1}),
+		"record_hashes": []uint64{1},
+	}}})
+
+	input := h.records(t)
+	records, res := resolveIndefiniteAppends(input)
+	if res.Skipped == "" || len(records) != len(input) {
+		t.Fatalf("expected resolution to be skipped, got %+v with %d records", res, len(records))
+	}
+	if result := checkRecords(t, records); result != porcupine.Illegal {
+		t.Fatalf("expected not linearizable, got %v", result)
+	}
+}
+
+func TestResolveWithoutFinalReadLeavesHistoryUnchanged(t *testing.T) {
+	var h historyBuilder
+	h.add(t, 1, 0, appendStart([]uint64{1}, nil, nil))
+	h.add(t, 1, 0, indefinite())
+	h.add(t, 2, 1, readStart())
+	h.add(t, 2, 1, readSuccess([]uint64{1}))
+
+	input := h.records(t)
+	records, res := resolveIndefiniteAppends(input)
+	if res != (Resolution{Unresolved: 1}) || len(records) != len(input) {
+		t.Fatalf("expected the history unchanged, got %+v with %d records", res, len(records))
+	}
+}
+
+// Many indefinite appends overlapping many reads: each read pins which of them
+// have taken effect so far. Without resolution the checker does not finish this
+// history within 20s even at 12 appends.
+func TestResolveKeepsManyIndefiniteAppendsTractable(t *testing.T) {
+	const n = 24
+	var h historyBuilder
+	var stream []uint64
+	for i := 0; i < n; i++ {
+		h.add(t, i+1, i, appendStart([]uint64{uint64(1000 + i)}, nil, nil))
+	}
+	for i := 0; i < n; i += 2 {
+		stream = append(stream, uint64(1000+i))
+	}
+	for j := 0; j <= len(stream); j++ {
+		opID := n + j
+		h.add(t, 100, opID, readStart())
+		h.add(t, 100, opID, readSuccess(stream[:j]))
+	}
+	for i := 0; i < n; i++ {
+		h.add(t, i+1, i, indefinite())
+	}
+	h.add(t, 101, 2*n+1, readStart())
+	h.add(t, 101, 2*n+1, finalReadSuccess(stream))
+
+	records, res := resolveIndefiniteAppends(h.records(t))
+	if res != (Resolution{Applied: n / 2, NotApplied: n / 2}) {
+		t.Fatalf("unexpected resolution: %+v", res)
+	}
+	if result := checkRecords(t, records); result != porcupine.Ok {
+		t.Fatalf("expected linearizable, got %v", result)
 	}
 }
