@@ -442,6 +442,12 @@ async fn resolve_read_tail(
                     tail = record.seq_num + 1;
                 }
             }
+            // The SDK resumes an interrupted session after the last record it
+            // delivered. Resuming at the tail is rejected as unwritten, but by
+            // then every record has been read.
+            Err(ReadSessionError::Read(ReadError::ReadUnwritten(pos))) if pos.seq_num == tail => {
+                break;
+            }
             Err(e) => {
                 error!(?e, "read error");
                 return Ok(CallFinish::ReadFailure);
@@ -642,7 +648,14 @@ pub async fn read_all_record_hashes(stream: &S2Stream) -> eyre::Result<(u64, Vec
     let mut tail = 0;
     let mut record_hashes = Vec::new();
     while let Some(resp) = session.next().await {
-        let batch = resp.map_err(|e| eyre::eyre!(e))?;
+        let batch = match resp {
+            Ok(batch) => batch,
+            // Resumed at the tail after an interruption; see `resolve_read_tail`.
+            Err(ReadSessionError::Read(ReadError::ReadUnwritten(pos))) if pos.seq_num == tail => {
+                break;
+            }
+            Err(e) => return Err(eyre::eyre!(e)),
+        };
         for record in &batch.records {
             record_hashes.push(xxh3_64(record.body.as_ref()));
             tail = record.seq_num + 1;
