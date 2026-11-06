@@ -676,3 +676,24 @@ func TestResolveKeepsManyIndefiniteAppendsTractable(t *testing.T) {
 		t.Fatalf("expected linearizable, got %v", result)
 	}
 }
+
+// S2 streams start with an empty fencing token, so an append that supplies ""
+// succeeds on a fresh stream, and one that supplies any other token fails.
+func TestEmptyFencingTokenMatchesFreshStream(t *testing.T) {
+	batch := []uint64{11}
+	for _, tc := range []struct {
+		token string
+		want  porcupine.CheckResult
+	}{
+		{"", porcupine.Ok},
+		{"abc", porcupine.Illegal},
+	} {
+		events := []porcupine.Event{
+			{Kind: porcupine.CallEvent, Value: StreamInput{InputType: 0, NumRecords: Ptr(uint64(1)), RecordHashes: batch, BatchFencingToken: Ptr(tc.token)}, Id: 0, ClientId: 0},
+			{Kind: porcupine.ReturnEvent, Value: StreamOutput{Tail: Ptr(uint64(1))}, Id: 0, ClientId: 0},
+		}
+		if result, _ := porcupine.CheckEventsVerbose(s2Model.ToModel(), events, 0); result != tc.want {
+			t.Errorf("append with token %q on a fresh stream: got %v, want %v", tc.token, result, tc.want)
+		}
+	}
+}
