@@ -532,16 +532,37 @@ func Ptr[T any](v T) *T {
 func recordsFromReader(r io.Reader) ([]Record, error) {
 	decoder := json.NewDecoder(r)
 	var records []Record
+	finished := make(map[int]bool)
+	open := 0
 
 	for {
 		var record Record
 		if err := decoder.Decode(&record); err != nil {
 			if err == io.EOF {
+				if len(records) == 0 {
+					return nil, fmt.Errorf("history contains no operations")
+				}
+				if open != 0 {
+					return nil, fmt.Errorf("truncated history at byte offset %d: %d Start events without Finish", decoder.InputOffset(), open)
+				}
 				return records, nil
 			}
 			return nil, fmt.Errorf("decode record at byte offset %d: %w", decoder.InputOffset(), err)
 		}
-		if record.Event.Start == nil && record.Event.Finish == nil {
+		switch {
+		case record.Event.Start != nil:
+			if _, seen := finished[record.OpID]; seen {
+				return nil, fmt.Errorf("record at byte offset %d: duplicate Start for op_id %d", decoder.InputOffset(), record.OpID)
+			}
+			finished[record.OpID] = false
+			open++
+		case record.Event.Finish != nil:
+			if done, seen := finished[record.OpID]; !seen || done {
+				return nil, fmt.Errorf("record at byte offset %d: Finish for op_id %d without an open Start", decoder.InputOffset(), record.OpID)
+			}
+			finished[record.OpID] = true
+			open--
+		default:
 			return nil, fmt.Errorf("record at byte offset %d has neither Start nor Finish event", decoder.InputOffset())
 		}
 		records = append(records, record)

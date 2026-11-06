@@ -109,17 +109,18 @@ func TestEventsFromReaderRejectsMalformedJSON(t *testing.T) {
 }
 
 func TestEventsFromReaderDecodesReadSuccessStreamHash(t *testing.T) {
-	input := strings.NewReader(`{"event":{"Finish":{"ReadSuccess":{"tail":7,"stream_hash":42}}},"client_id":1,"op_id":2}`)
+	input := strings.NewReader(`{"event":{"Start":"Read"},"client_id":1,"op_id":2}
+{"event":{"Finish":{"ReadSuccess":{"tail":7,"stream_hash":42}}},"client_id":1,"op_id":2}`)
 	events, err := eventsFromReader(input)
 	if err != nil {
 		t.Fatalf("eventsFromReader: %v", err)
 	}
-	if len(events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(events))
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
 	}
-	output, ok := events[0].Value.(StreamOutput)
+	output, ok := events[1].Value.(StreamOutput)
 	if !ok {
-		t.Fatalf("expected StreamOutput, got %T", events[0].Value)
+		t.Fatalf("expected StreamOutput, got %T", events[1].Value)
 	}
 	if output.StreamHash == nil || *output.StreamHash != 42 {
 		t.Fatalf("expected stream hash 42, got %v", output.StreamHash)
