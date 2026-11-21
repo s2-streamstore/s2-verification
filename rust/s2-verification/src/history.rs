@@ -2,10 +2,11 @@ use antithesis_sdk::random::AntithesisRng;
 use rand::RngExt;
 use s2_sdk::{
     S2Stream,
-    error::{ReadError, ReadSessionError},
+    error::ReadSessionError,
+    read_session::ReadSessionConfig,
     types::{
         AppendInput, AppendRecord, AppendRecordBatch, CommandRecord, FencingToken, MeteredBytes,
-        ReadBatch, ReadFrom, ReadInput, ReadLimits, ReadSessionConfig, ReadStart, ReadStop,
+        ReadFrom, ReadInput, SequencedRecord,
     },
 };
 use serde::Serialize;
@@ -420,32 +421,19 @@ pub async fn client(
 
 #[tracing::instrument(level = Level::TRACE, skip_all)]
 async fn resolve_read_tail(
-    mut stream: impl Stream<Item = Result<ReadBatch, ReadSessionError>> + Unpin,
+    mut stream: impl Stream<Item = Result<SequencedRecord, ReadSessionError>> + Unpin,
 ) -> eyre::Result<CallFinish> {
     let mut tail = 0;
     let mut stream_hash = 0;
     while let Some(resp) = stream.next().await {
         trace!(?resp, "read response");
         match resp {
-            Ok(batch) => {
-                // Check if we got a tail position (indicates end of stream)
-                if let Some(tail_pos) = batch.tail
-                    && batch.records.is_empty()
-                {
-                    panic!(
-                        "read_session yielded a tail-only empty batch: tail={}",
-                        tail_pos.seq_num
-                    );
-                }
-                for record in &batch.records {
-                    stream_hash = chain_hash(stream_hash, xxh3_64(record.body.as_ref()));
-                    tail = record.seq_num + 1;
-                }
+            Ok(record) => {
+                stream_hash = chain_hash(stream_hash, xxh3_64(record.body.as_ref()));
+                tail = record.seq_num + 1;
             }
-            // The SDK resumes an interrupted session after the last record it
-            // delivered. Resuming at the tail is rejected as unwritten, but by
-            // then every record has been read.
-            Err(ReadSessionError::Read(ReadError::ReadUnwritten(pos))) if pos.seq_num == tail => {
+            // Reading from seq_num 0 on an empty stream reports unwritten at tail 0.
+            Err(ReadSessionError::ReadUnwritten(err)) if err.tail.seq_num == tail => {
                 break;
             }
             Err(e) => {
@@ -474,32 +462,20 @@ async fn read_session(
         op_id,
     })?;
 
-    let read_session = stream
-        .read_session(
-            ReadInput::new()
-                // Read the entire stream from the head, so the cumulative hash
-                // covers every record, not just the tail.
-                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
-                // Read must include a limit, otherwise we will enter a tailing session.
-                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(usize::MAX))),
-            ReadSessionConfig::default(),
-        )
-        .await;
+    let read_session = stream.read_session(
+        ReadInput::new()
+            // Read the entire stream from the head, so the cumulative hash
+            // covers every record, not just the tail.
+            .with_from(ReadFrom::SeqNum(0))
+            // Read must include a limit, otherwise we will enter a tailing session.
+            .with_count(u64::MAX),
+        ReadSessionConfig::default(),
+    );
 
     let finish = match read_session {
         Ok(stream) => {
             trace!("read_session stream");
             resolve_read_tail(stream).await?
-        }
-        // Reading from seq_num 0 on an empty stream is reported as unwritten;
-        // that is still an authoritative observation of an empty stream.
-        Err(ReadSessionError::Read(ReadError::ReadUnwritten(pos))) if pos.seq_num == 0 => {
-            trace!("read_session on empty stream");
-            CallFinish::ReadSuccess {
-                tail: 0,
-                stream_hash: 0,
-                record_hashes: None,
-            }
         }
         Err(_e) => {
             trace!("read_session error");
@@ -627,39 +603,29 @@ async fn append(
 ///
 /// Returns `(0, [])` for an empty stream.
 pub async fn read_all_record_hashes(stream: &S2Stream) -> eyre::Result<(u64, Vec<u64>)> {
-    let read_session = stream
+    let mut session = stream
         .read_session(
             ReadInput::new()
-                .with_start(ReadStart::new().with_from(ReadFrom::SeqNum(0)))
+                .with_from(ReadFrom::SeqNum(0))
                 // Read must include a limit, otherwise we will enter a tailing session.
-                .with_stop(ReadStop::new().with_limits(ReadLimits::new().with_count(usize::MAX))),
+                .with_count(u64::MAX),
             ReadSessionConfig::default(),
         )
-        .await;
-
-    let mut session = match read_session {
-        Ok(session) => session,
-        Err(ReadSessionError::Read(ReadError::ReadUnwritten(pos))) if pos.seq_num == 0 => {
-            return Ok((0, Vec::new()));
-        }
-        Err(e) => return Err(eyre::eyre!(e)),
-    };
+        .map_err(|e| eyre::eyre!(e))?;
 
     let mut tail = 0;
     let mut record_hashes = Vec::new();
     while let Some(resp) = session.next().await {
-        let batch = match resp {
-            Ok(batch) => batch,
-            // Resumed at the tail after an interruption; see `resolve_read_tail`.
-            Err(ReadSessionError::Read(ReadError::ReadUnwritten(pos))) if pos.seq_num == tail => {
+        let record = match resp {
+            Ok(record) => record,
+            // Reading from seq_num 0 on an empty stream reports unwritten at tail 0.
+            Err(ReadSessionError::ReadUnwritten(err)) if err.tail.seq_num == tail => {
                 break;
             }
             Err(e) => return Err(eyre::eyre!(e)),
         };
-        for record in &batch.records {
-            record_hashes.push(xxh3_64(record.body.as_ref()));
-            tail = record.seq_num + 1;
-        }
+        record_hashes.push(xxh3_64(record.body.as_ref()));
+        tail = record.seq_num + 1;
     }
     Ok((tail, record_hashes))
 }

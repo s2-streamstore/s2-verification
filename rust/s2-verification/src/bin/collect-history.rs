@@ -5,17 +5,12 @@ use futures::stream::FuturesUnordered;
 use s2_sdk::{
     S2,
     error::ErrorCode,
-    types::{
-        AppendRetryPolicy, BasinName, CreateStreamInput, RetryConfig, S2Config, S2Endpoints,
-        StreamName,
-    },
+    types::{AppendRetryPolicy, BasinName, CreateStreamInput, RetryConfig, S2Config, StreamName},
 };
 use s2_verification::history::{
     CallFinish, Event, LabeledEvent, client, fencing_token_client, final_read, initialize_tail,
     match_seq_num_client, read_all_record_hashes,
 };
-use std::env;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -68,16 +63,11 @@ async fn main() -> eyre::Result<()> {
     let basin: BasinName = basin.parse()?;
     let stream: StreamName = stream.parse()?;
 
-    let custom_endpoints = S2Endpoints::from_env().ok();
-    let mut setup_config = S2Config::new(env::var("S2_ACCESS_TOKEN")?).with_retry(
+    let setup_config = S2Config::from_env()?.with_retry(
         RetryConfig::new()
-            .with_max_attempts(NonZeroU32::new(1024).expect("non-zero"))
+            .with_max_attempts(1024)?
             .with_min_base_delay(Duration::from_millis(1000)),
     );
-
-    if let Some(endpoints) = custom_endpoints {
-        setup_config = setup_config.with_endpoints(endpoints);
-    }
 
     let test_config = setup_config.clone().with_retry(
         RetryConfig::default().with_append_retry_policy(AppendRetryPolicy::NoSideEffects),
