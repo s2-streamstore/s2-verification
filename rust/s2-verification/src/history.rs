@@ -466,7 +466,7 @@ async fn read_session(
         ReadInput::new()
             // Read the entire stream from the head, so the cumulative hash
             // covers every record, not just the tail.
-            .with_from(ReadFrom::SeqNum(0))
+            .with_start(ReadFrom::SeqNum(0))
             // Read must include a limit, otherwise we will enter a tailing session.
             .with_count(u64::MAX),
         ReadSessionConfig::default(),
@@ -606,7 +606,7 @@ pub async fn read_all_record_hashes(stream: &S2Stream) -> eyre::Result<(u64, Vec
     let mut session = stream
         .read_session(
             ReadInput::new()
-                .with_from(ReadFrom::SeqNum(0))
+                .with_start(ReadFrom::SeqNum(0))
                 // Read must include a limit, otherwise we will enter a tailing session.
                 .with_count(u64::MAX),
             ReadSessionConfig::default(),
