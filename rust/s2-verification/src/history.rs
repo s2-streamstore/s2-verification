@@ -5,8 +5,8 @@ use s2_sdk::{
     error::ReadSessionError,
     read_session::ReadSessionConfig,
     types::{
-        AppendInput, AppendRecord, AppendRecordBatch, CommandRecord, FencingToken, MeteredBytes,
-        ReadInput, ReadStart, SequencedRecord,
+        AppendInput, AppendRecord, AppendRecordBatch, CommandRecord, FencingToken, ReadInput,
+        ReadStart, SequencedRecord,
     },
 };
 use serde::Serialize;
