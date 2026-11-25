@@ -598,24 +598,12 @@ async fn append(
     })
 }
 
-/// Read the entire stream from the head, returning the tail and the xxh3
-/// hash of every record body, in sequence order.
-///
-/// Returns `(0, [])` for an empty stream.
-pub async fn read_all_record_hashes(stream: &S2Stream) -> eyre::Result<(u64, Vec<u64>)> {
-    let mut session = stream
-        .read_session(
-            ReadInput::new()
-                .with_start(ReadStart::SeqNum(0))
-                // Read must include a limit, otherwise we will enter a tailing session.
-                .with_count(u64::MAX),
-            ReadSessionConfig::default(),
-        )
-        .map_err(|e| eyre::eyre!(e))?;
-
+async fn collect_record_hashes(
+    mut stream: impl Stream<Item = Result<SequencedRecord, ReadSessionError>> + Unpin,
+) -> eyre::Result<(u64, Vec<u64>)> {
     let mut tail = 0;
     let mut record_hashes = Vec::new();
-    while let Some(resp) = session.next().await {
+    while let Some(resp) = stream.next().await {
         let record = match resp {
             Ok(record) => record,
             // Reading from seq_num 0 on an empty stream reports unwritten at tail 0.
@@ -628,6 +616,23 @@ pub async fn read_all_record_hashes(stream: &S2Stream) -> eyre::Result<(u64, Vec
         tail = record.seq_num + 1;
     }
     Ok((tail, record_hashes))
+}
+
+/// Read the entire stream from the head, returning the tail and the xxh3
+/// hash of every record body, in sequence order.
+///
+/// Returns `(0, [])` for an empty stream.
+pub async fn read_all_record_hashes(stream: &S2Stream) -> eyre::Result<(u64, Vec<u64>)> {
+    let session = stream
+        .read_session(
+            ReadInput::new()
+                .with_start(ReadStart::SeqNum(0))
+                // Read must include a limit, otherwise we will enter a tailing session.
+                .with_count(u64::MAX),
+            ReadSessionConfig::default(),
+        )
+        .map_err(|e| eyre::eyre!(e))?;
+    collect_record_hashes(session).await
 }
 
 /// Read the whole stream once every client has finished, and log it as a read
@@ -757,6 +762,93 @@ mod tests {
         assert_eq!(
             json,
             r#"{"ReadSuccess":{"tail":2,"stream_hash":42,"record_hashes":[1,2]}}"#
+        );
+    }
+
+    fn test_record(seq_num: u64, body: &'static [u8]) -> SequencedRecord {
+        SequencedRecord::new(seq_num, body, Vec::new(), 0)
+    }
+
+    fn unwritten(seq_num: u64) -> ReadSessionError {
+        ReadSessionError::ReadUnwritten(s2_sdk::error::ReadUnwrittenError::new(
+            s2_sdk::types::StreamPosition::new(seq_num, 0),
+        ))
+    }
+
+    #[tokio::test]
+    async fn read_paths_handle_empty_stream_unwritten() {
+        let finish = resolve_read_tail(tokio_stream::iter([Err(unwritten(0))]))
+            .await
+            .unwrap();
+        assert!(matches!(
+            finish,
+            CallFinish::ReadSuccess {
+                tail: 0,
+                stream_hash: 0,
+                record_hashes: None,
+            }
+        ));
+
+        let (tail, hashes) = collect_record_hashes(tokio_stream::iter([Err(unwritten(0))]))
+            .await
+            .unwrap();
+        assert_eq!((tail, hashes), (0, Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn read_paths_compute_tail_and_hashes_on_clean_end_and_matching_unwritten() {
+        let expected_hashes = vec![xxh3_64(b"foo"), xxh3_64(b"bar")];
+        let expected_chain = chain_hash(chain_hash(0, expected_hashes[0]), expected_hashes[1]);
+
+        for trailing in [None, Some(Err(unwritten(2)))] {
+            let items: Vec<_> = [Ok(test_record(0, b"foo")), Ok(test_record(1, b"bar"))]
+                .into_iter()
+                .chain(trailing)
+                .collect();
+
+            let finish = resolve_read_tail(tokio_stream::iter(items.clone()))
+                .await
+                .unwrap();
+            assert!(matches!(
+                finish,
+                CallFinish::ReadSuccess {
+                    tail: 2,
+                    stream_hash,
+                    record_hashes: None,
+                } if stream_hash == expected_chain
+            ));
+
+            let (tail, hashes) = collect_record_hashes(tokio_stream::iter(items))
+                .await
+                .unwrap();
+            assert_eq!(tail, 2);
+            assert_eq!(hashes, expected_hashes);
+        }
+    }
+
+    #[tokio::test]
+    async fn read_paths_reject_unwritten_with_mismatched_tail() {
+        // Mismatched tail on an empty stream (tail=0, error reports tail=1).
+        let finish = resolve_read_tail(tokio_stream::iter([Err(unwritten(1))]))
+            .await
+            .unwrap();
+        assert!(matches!(finish, CallFinish::ReadFailure));
+        assert!(
+            collect_record_hashes(tokio_stream::iter([Err(unwritten(1))]))
+                .await
+                .is_err()
+        );
+
+        // Partial read followed by unwritten reporting a different tail.
+        let partial = vec![Ok(test_record(0, b"foo")), Err(unwritten(5))];
+        let finish = resolve_read_tail(tokio_stream::iter(partial.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(finish, CallFinish::ReadFailure));
+        assert!(
+            collect_record_hashes(tokio_stream::iter(partial))
+                .await
+                .is_err()
         );
     }
 }
